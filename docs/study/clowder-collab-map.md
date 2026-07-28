@@ -20,6 +20,17 @@
 
 脉络章开头同样：先「整章在六脉里解什么问题」，再章级定锚，再链到主题小节。
 
+### 防「用新概念解释概念」
+
+抓重点用这条：**先只用读者已经听过的词把事说完，专有名词最后当标签贴上。**
+
+| 做法 | 例 |
+|------|-----|
+| ✅ 旧词说完 → 括号标术语 | 「把流水账从头加一遍，得到一张『现在谁负责、什么状态』的快照——这张快照就叫投影」 |
+| ❌ 术语套术语 | 「投影是事件溯源里对聚合的物化读模型」 |
+
+本图已出现的「已知词」优先复用：球权、责任、谁该动手、流水账/事件列表、当前状态、持球人、叫醒、行首 `@`。新词首次出现必须带一句旧词释义。
+
 ### 入库规矩
 
 | 情况 | 动作 |
@@ -93,7 +104,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | 账本=EventLog；管理=Ingest/Projector 等分工 | 无单一 BallManager | 继续细问 Redis key / 事件字段，或开调度 |
+| 1 | 投影=当前球权快照；已定「旧词优先」写法 | 防术语套术语 | 继续细问，或开调度 |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 调度 / 记忆 / … |
 
 （懂了就删行；整表最多 3 条。）
@@ -385,27 +396,36 @@ stateDiagram-v2
 | 写入 | `BallCustodyIngest.ts` |
 | subjectKey | `ball:thread:{id}` / `ball:task:{id}` |
 
-**「账本」是什么、球权由哪些类管**
+**「账本」和「投影」——先用旧词**
 
-账本 ≠ 一张「当前持球人」表。这里的账本 = **按责任单元追加的球权事件流水**（只增不改、不删），接口 `IBallCustodyEventLog`，实现 `RedisBallCustodyEventLog`：
+球权要同时满足两件事：
 
-- Redis key 形如 `ballcustody:events:log:{subjectKey}`（LIST）+ 全局 `seen` SET 做 `sourceEventId` 幂等  
-- 一条事件大概是：`kind`（如 `ball.handed`）+ `subjectKey` + `payload`（如 toCatId）+ `at`  
-- **谁现在持球、处于哪一态**不写在账本里改来改去，而由投影算出来
+1. **事后能查清发生过什么** → 需要一份只往上加、不改历史的记录（交出去、hold、调用挂了…）  
+2. **现在要一眼看到谁负责、什么状态** → 若每次都从头把整份记录加一遍太慢，所以另存一张「算到现在」的结果表  
 
-球权**没有**单一 `BallManager` 上帝类，而是按职责拆在 `packages/api/src/domains/ball-custody/`：
+| 人话 | 文档里的标签 | 对应类 |
+|------|--------------|--------|
+| 只追加的历史流水（发生过什么） | 常称**账本** / EventLog | `RedisBallCustodyEventLog` |
+| 「算到现在」的结果：谁持球、哪一态 | 常称**投影** / Projection | `BallCustodyProjector` 算出来，存进 `RedisBallCustodyProjectionStore` |
 
-| 类 / 模块 | 管什么 |
-|-----------|--------|
-| `ball-custody-events.ts`（`buildHandedEvent` 等） | 从旁路动作**构造**事件 |
-| `BallCustodyIngest` | 写入入口：`append` + 若新事件则 `projector.apply` |
-| `RedisBallCustodyEventLog` | **账本本身**（append-only 真相源） |
-| `transition()`（`ball-custody-state-machine.ts`） | 纯函数：当前态 + 事件 → 下一态 |
-| `BallCustodyProjector` | 读投影 → transition → 字段 effect（holder/heldUntil…）→ 保存 |
-| `RedisBallCustodyProjectionStore` | 投影读写（可 rebuild=replay 账本） |
-| `BallCustodyProbeScheduler` / `WakeSender` | blocked 探针与唤醒（副作用，不进 projector） |
+所以：**投影 = 根据历史流水算出来、并缓存下来的「当前球权快照」**（里面有 `holder`、`state`、`heldUntil` 等）。  
+值班简报读的是这张快照；快照坏了或要核对，可以把流水从头重放再算一遍（rebuild）。
 
-路由等旁路（如 `route-serial`）只 **fire-and-forget** 调 `ingest.record`，自己不改球权状态。
+不是：另有一套人改的「权威当前表」。权威历史在流水里；快照可以丢了重算。
+
+球权**没有**单一 `BallManager`，分工在 `packages/api/src/domains/ball-custody/`：
+
+| 类 / 模块 | 人话 |
+|-----------|------|
+| `ball-custody-events.ts` | 把系统动作写成一条流水记录 |
+| `BallCustodyIngest` | 写入入口：先记流水，新记录才更新快照 |
+| `RedisBallCustodyEventLog` | 存历史流水 |
+| `transition()` | 已知「当前态 + 新记录」→ 下一态 |
+| `BallCustodyProjector` | 更新快照（holder/state 等） |
+| `RedisBallCustodyProjectionStore` | 存快照 |
+| `ProbeScheduler` / `WakeSender` | 该叫醒谁时去叫醒（不写进快照逻辑里） |
+
+路由等只旁路调用 `ingest.record`，自己不改球权快照。
 
 `BallState`：`new` → `active` | `blocked` | `parked` | `dead` | `void` | `zombie` | `resolved`
 
@@ -525,4 +545,5 @@ stateDiagram-v2
 | 2026-07-28 | 回退梯补：最后发言 vs 最近对话可分叉 |
 | 2026-07-28 | 回退梯补对偶缺口：A2A 后无@追问可能仍打到旧 user @ |
 | 2026-07-28 | 球权节：定义≠发言；事件溯源；状态机+序列 UML |
-| 2026-07-28 | 球权节：账本=EventLog；类职责表（Ingest/Projector/…） |
+| 2026-07-28 | 球权节：账本=EventLog；类职责表 |
+| 2026-07-29 | 投影=当前快照（旧词先说）；文首加「防新概念套概念」规矩 |
