@@ -10,11 +10,18 @@
 2. 再看 [当前卡点](#2-当前卡点)——忘了聊到哪，看这里  
 3. 深挖时进对应脉络章；主题多了会在章内再拆小节  
 
+### 章节写法（固定两段式）
+
+每个主题小节：
+
+1. **先一句定锚**——用项目里的词（球权、行首 `@`、`targetCats`、`hold_ball`、InvocationQueue…），说明机制是什么；不用外部比喻  
+2. **再写技术密度**——文件路径、常量、字段、状态/事件、实现顺序；够对照代码
+
 ### 入库规矩
 
 | 情况 | 动作 |
 |------|------|
-| 钉住一条新理解 / 纠正误解 | 写入对应脉络章（≤2 句）；需要时补小图 |
+| 钉住一条新理解 / 纠正误解 | 写入对应主题：一句定锚 + 必要技术段；需要时补图 |
 | 卡点变了 | 改写 §2（最多 3 条；懂了就删） |
 | 冒出想挖的新题 | 只往 [待展开](#4-待展开) 加标题 |
 | 以上都没有 | **本轮不改文件** |
@@ -34,7 +41,7 @@
 
 ## 1. 总地图
 
-一句话：Clowder 不替猫思考，只给它们当团队的办公室——谁是谁、球给谁、怎么排队、记什么、按什么规矩干。
+**定锚：** Clowder 是模型与 Agent CLI 之上的平台层，负责身份、A2A 球权路由、调度排队、记忆检索与 SOP 纪律；推理与工具执行仍由各猫 CLI 完成。
 
 ```mermaid
 flowchart TB
@@ -64,16 +71,16 @@ flowchart TB
   click Sop "#vein-sop" "纪律"
 ```
 
-**跳转（渲染器若不支持图内点击，用这行）：**  
+**跳转：**  
 [① 身份](#vein-identity) · [② 传球](#vein-pass) · [③ 调度](#vein-dispatch) · [④ 记忆](#vein-memory) · [⑤ 技能与工具](#vein-skills) · [⑥ 纪律](#vein-sop)
 
-三层分工（背景，不单独成章）：
+三层分工：
 
-| 层 | 白话 | 干什么 |
+| 层 | 负责 | 不负责 |
 |----|------|--------|
-| 模型 | 脑子 | 推理、生成 |
-| Agent CLI | 手脚 | 改文件、跑命令、用工具 |
-| 平台（Clowder） | 办公室 | 身份、传话、排队、记忆、门禁 |
+| 模型 | 推理、生成 | 长期记忆、团队纪律 |
+| Agent CLI | 工具、文件、命令 | 跨猫球权、互审编排 |
+| 平台（Clowder） | 身份、A2A 路由、排队、记忆、SOP | 替模型推理 |
 
 ---
 
@@ -81,8 +88,8 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | 传球章已较完整 | 回退梯 / 掉球 / hold 已钉 | 换下一条脉络？或追问某一形态的代码细节 |
-| 2 | 其它五脉仍只一句 | 尚未点名 | 建议下一条：**调度**（排队怎么接住传球） |
+| 1 | 传球章已按「一句定锚 + 技术密度」重写 | 结构约定刚落地 | 密度/定锚句是否还要改；或开 **③ 调度** |
+| 2 | 其它五脉仍只有章级定锚 | 尚未点名深挖 | 身份 / 调度 / 记忆 / … |
 
 （懂了就删行；整表最多 3 条。）
 
@@ -94,7 +101,7 @@ flowchart TB
 
 ### ① 身份 — 每只猫是谁
 
-**定锚：** 不是临时工具号，是长期队友——有名字、性格、角色；跨会话也还是「同一只猫」。
+**定锚：** 每只猫有稳定的 `catId` / roster 配置与会话绑定，跨 session 仍是同一身份，而不是一次性工具号。
 
 *（尚无主题小节）* · [回总地图](#1-总地图)
 
@@ -102,119 +109,163 @@ flowchart TB
 
 <a id="vein-pass"></a>
 
-### ② 传球 — 谁该接着干
+### ② 传球 — A2A 球权与路由
 
-**定锚：** 球权 = 此刻该谁动手；`@猫` 是路由指令（叫醒谁），不只是聊天提醒。猫也可以把球传给另一只猫。
+**定锚：** 球权表示「此刻谁该对某个责任单元行动」；合法移交只有行首 `@` 文本路由或 MCP `targetCats`（及 multi_mention `targets`），接收方再决定接 / 退 / 升。
 
-**章内跳转：** [传球大概](#pass-overview) · [@ 解析细则](#pass-mention-parse) · [回退梯](#pass-fallback) · [球掉了](#pass-dropped) · [hold_ball](#pass-hold) · [回总地图](#1-总地图)
+**章内跳转：** [传球大概](#pass-overview) · [@ 解析细则](#pass-mention-parse) · [回退梯](#pass-fallback) · [球权状态](#pass-dropped) · [hold_ball](#pass-hold) · [回总地图](#1-总地图)
 
 <a id="pass-overview"></a>
 
 #### 传球大概
 
+**定锚：** A2A 把「谁被叫醒」交给机械路由，把「接不接、退给谁、升给谁」交给被叫醒的猫；状态迁移须由现实动作产生，纯文字声明不算。
+
 ```mermaid
 flowchart LR
-  Msg["消息里的 @猫<br/>（行首才算）"] --> Mech["代码机械路由<br/>叫醒谁"]
+  Msg["行首 @ 或 targetCats"] --> Mech["机械路由"]
   Mech --> Cat["被叫醒的猫"]
-  Cat --> Acc["接：干活"]
-  Cat --> Dec["退：@ 对的猫"]
-  Cat --> Esc["升：@ 人"]
-  Acc --> Real["做完 → 真动作 + @下一只"]
+  Cat --> Acc["接"]
+  Cat --> Dec["退 → 再 @"]
+  Cat --> Esc["升 → @ 人"]
+  Acc --> Real["现实动作后再路由"]
   Real --> Mech
 ```
 
-**已钉：**
+**技术密度**
 
-1. **球 = 责任**：谁持球，谁该接着动；传球靠行首 `@`，不是普通@提醒。
-2. **两层分工**：代码只负责「机械叫醒」；接不接、退给谁、升给人——交给被叫醒的猫自己判断。
-3. **真传球要有现实动作**：光说「交给你了」不算；要有工具调用 / 提交 / review 结论等，再 `@` 下一只。纯文字来回踢 = 乒乓球，系统会熔断提醒。
-4. **旁路**：等外部条件时可以 `hold_ball`（先把球按住），条件到了再唤醒续接——细节待展开。
-5. **两条合法出路**：行首文本 `@` **或** MCP 结构化字段 `targetCats`（发消息工具里点名）；句中 `@` 不算路由。
+| 出路 | 机制 | 代码锚 |
+|------|------|--------|
+| 文本路由 | 行首 `@handle` 解析成功 → 分发 | `a2a-mentions.ts` → `AgentRouter` / `route-serial` |
+| 结构化路由 | MCP 发消息带 `targetCats`（或 `targets`） | `callback-tools` / `route-serial` |
 
-*文档锚：`docs/architecture/at-mention-routing-system.md` · 架构图「A2A 球权流转」*
+流水线六层（`docs/architecture/at-mention-routing-system.md`）：
+
+```
+提及解析 → 目标解析(@→catId) → 无@则回退梯 → 分发调度
+         → 上下文组装 → LLM 接/退/升
+```
+
+- 前 5 层：确定性代码；第 6 层：LLM 三选一  
+- 「退」不是单独 API：再写行首 `@`，重新走提及解析  
+- 真传球期望伴随 tool call / commit / review verdict 等；乒乓球与虚空传球检测针对「声明与动作脱节」  
+- `hold_ball` 是有界持球例外，不是默认出口（见下节）  
+- 解析/回退只决定**叫醒谁**；进队与 busy gate 属 [③ 调度](#vein-dispatch)
 
 <a id="pass-mention-parse"></a>
 
-#### @ 解析细则
+#### @ 解析细则与交接上下文
 
-**为啥必须行首？**  
-早期试过「句中 + 动作词」（请让 @xxx…）→ 误报多、歧义大。现行约定：**想叫醒谁，就把 `@handle` 放行首**（行前空格、`>`、`-`、`1.` 等 markdown 前缀可以）。句中只当普通文字；另外有「影子检测」可提醒写错了，但**不拿来路由**。
+**定锚：** 文本路径只把「行首 `@` + mentionPatterns 命中」当成可路由提及；消息正文没有交接 XML tag，交接语义靠调用上下文字段注入 system prompt。
 
-**一次最多几只？**  
-`MAX_A2A_MENTION_TARGETS = 2`——单条消息最多叫醒 **2 只不同的猫**（安全阀，防一把扇出去太多）。
+**技术密度 — 解析**
 
-**解析怎么走（代码白话）：**  
-文件：`packages/api/.../routing/a2a-mentions.ts`
+文件：`packages/api/src/domains/cats/services/agents/routing/a2a-mentions.ts`
 
-```
-去掉 ```代码块```
-  → 从花名册取出每只猫的 mentionPatterns（最长优先，防 @opus 吃掉 @opus-48）
-  → 按行扫：去掉行首空白/列表前缀后，必须以 @ 开头
-  → 匹配 pattern + 词边界（避免邮箱、半截名字）
-  → 过滤自己；猫禁用则记警告、不叫醒
-  → 凑满 2 只就停
-```
+| 项 | 值 / 行为 |
+|----|-----------|
+| 单条目标上限 | `MAX_A2A_MENTION_TARGETS = 2` |
+| 链深度（另一维度） | `getMaxA2ADepth()` → `MAX_A2A_DEPTH \|\| 15` |
+| 行首规则 | F046：行首即路由，无需动作词；可带空白与 `>` / `-` / `1.` 前缀 |
+| 句中 `@` | 不路由；影子检测（`InlineActionMention`）仅写侧反馈 |
+| 匹配顺序 | `catRegistry.mentionPatterns`，**最长优先**（防 `@opus` 吃 `@opus-48`） |
+| 边界 | `TOKEN_BOUNDARY_RE` / `HANDLE_CONTINUATION_RE` |
+| 自提及 | 过滤；disabled 猫 → `routing_warnings`，不进 `mentions` |
+| 预处理（实现主路径） | 去掉围栏 `` ```...``` ``；可选行首空白修复 |
 
-**交接有没有单独 tag？**  
-消息正文里**没有**特殊 XML/标签协议；叫醒仍靠行首 `@` 或 MCP `targetCats`。  
-被叫醒时，平台往 **调用上下文 / system prompt** 里注入结构化字段（不是聊天气泡里的 tag），常见：
+步骤：strip fence → 建 pattern 表 → 按行剥前缀 → 必须以 `@` 开头 → 最长匹配 + 边界 → 上限 2 停。
 
-| 字段 | 白话 |
-|------|------|
-| `directMessageFrom` | 「这是猫 X 点名叫你的，优先回 X」 |
-| `crossThreadReplyHint` | 跨线程来的球：从哪来、谁发的、效果类型 |
-| `pingPongWarning` | 俩猫来回踢太多次了，别再空传 |
-| `teammates` / `mode` | 这次还有谁、串行还是并行 |
+**技术密度 — 交接上下文**
 
-*代码锚：`SystemPromptBuilder` 的 D2/D4/D5 段；模板如 `assets/prompt-templates/d2-direct-message.md`*
+叫醒仍靠行首 `@` 或 `targetCats`。被叫醒时 `SystemPromptBuilder` 注入：
+
+| 字段 | Prompt 段 | 作用 |
+|------|-----------|------|
+| `directMessageFrom` | D2 | A2A 点名来源；优先回该猫（`d2-direct-message.md`） |
+| 同族分身 | D3 | displayName 撞车时的分身提醒 |
+| `crossThreadReplyHint` | D4 | `sourceThreadId` / `senderCatId` / 可选 `effectClass` |
+| `pingPongWarning` | D5 | 同对连踢警告 |
+| `teammates` / `mode` | D6/D7 | 队友与串行/并行 |
+
+这些是结构化 hydration → prompt 文本，不是消息内 tag。
 
 <a id="pass-fallback"></a>
 
-#### 回退梯（消息里没有 @ 时）
+#### 回退梯（本条无可路由 `@`）
 
-人常说「看起来不错，合掉吧」却不写 `@`。系统按优先级猜该叫醒谁（`AgentRouter.peekTargets`）：
+**定锚：** 当本条消息没有可路由提及时，`AgentRouter` 按固定优先级选出一只（或一组）目标猫，心智是「继续跟你刚才在跟的那只聊」，而不是「线程里谁最后发言」。
 
-```
-① 本条有显式 @ / @all 之类     → 用它
-② 最近几条「人」的消息里 @ 过谁 → 继续找那只（只看用户消息，防猫系统消息抢路由）
-③ 线程里最后健康回复的那只猫   → 「没 @ = 接着跟刚才那只聊」
-④ 线程偏好猫 / 系统默认猫       → 兜底
-```
+**技术密度**
 
-特例：前台接待线程（concierge）无 `@` 时固定找值班猫，不被「上次 @ 过谁」带走。
+文件：`AgentRouter.ts` → `peekTargets` / `findRecentUserMentionFallback`（F194）
+
+实现顺序：
+
+1. **本条显式 mention**（含 `@all` / `@thread` 等展开）→ 直接用  
+2. **`threadKind === 'concierge'`**：无本条 `@` 时固定 `preferredCats` 值班猫（不被历史 user mention 带走）  
+3. **最近用户提及 fallback**  
+   - 用户消息定义：`userId !== null && catId === null`  
+   - 窗口：约 **5 条 user message** 或 **1 小时**  
+   - 取最近一条中的 routable mention → **单猫** deterministic fallback  
+   - 不看猫消息（防愿景守护 / 跨贴抢路由）  
+4. **最后健康回复者**（`participantsWithActivity`，`lastResponseHealthy !== false`）  
+5. 偏好猫 / 任意健康参与者 / `getDefaultCatId()` 兜底  
 
 <a id="pass-dropped"></a>
 
-#### 球掉了长啥样
+#### 球权状态（掉球与保管链）
 
-球权有一本账（`ball-custody`）：事件流 + 投影状态。人话形态：
+**定锚：** 球权以 `ball-custody` 事件流为账本、投影为可读状态；异常形态（void / dead / parked / zombie…）由事件转移产生，不以扫聊天推断为真相源。
 
-| 形态 | 白话 | 典型怎么来的 |
-|------|------|--------------|
-| **活着 active** | 有人正经推着 | 行首 `@` 投递、正常干活；hold 中也算在 active（带着到期时间） |
-| **虚空 void** | 嘴上说传了，系统没动作 | 说了「交给你」但无行首 `@` / 无 `targetCats` / 无 hold |
-| **死球 dead** | 持球的那次调用挂了 | 崩了、额度没了、超时；或 hold 到期没人续 |
-| **阻塞 blocked** | 等外部条件 | 任务卡住等探针；条件到了可能完结，或弹回持有者再叫醒 |
-| **搁置 parked** | 球到了人手里晾着 | `@` 了共创者/operator，人忘了 |
-| **僵尸 zombie** | 心里不做了但没明说杀 | 长期无活动、也没正式关掉 |
-| **了结 resolved** | 正常做完或正式放弃 | task 完成；或冷冻/降级/放弃（安乐死） |
+**技术密度**
 
-值班简报优先甩异常球（晾着的、死的、虚空的），正常推进的活球往往只报个数。
+| 锚 | 路径 |
+|----|------|
+| Cell | `docs/architecture/ownership/cells/ball-custody.md`（F233） |
+| 类型 | `packages/shared/src/types/ball-custody.ts` |
+| 状态机 | `ball-custody-state-machine.ts`（纯函数表驱动，零 IO） |
+| subjectKey | `ball:thread:{id}` / `ball:task:{id}`（不另造球 ID） |
+
+`BallState`：`new` → `active` | `blocked` | `parked` | `dead` | `void` | `zombie` | `resolved`
+
+| 状态 | 含义 | 典型事件 |
+|------|------|----------|
+| active | 正常推进；hold 中常仍为 active，另有 `heldUntil` | `ball.handed`、`ball.held`、`invocation.started/heartbeat` |
+| void | 声明传球但无系统动作 | `ball.void_pass` |
+| dead | invocation 死亡或 hold 到期且匹配 | `invocation.died`；`ball.hold_expired`（须 `fireAt === heldUntil`） |
+| blocked | task 阻塞等探针 | `task.blocked`；`ball.wake_sent`（informational，不改态） |
+| parked | 球到 cvo/人手上晾着 | `ball.handed_cvo` 且 `intent=handoff` |
+| zombie | 长期 idle | `task.idle_long` |
+| resolved | 完成或安乐死 | `task.done`；`ball.frozen/degraded/abandoned` |
+
+`handed_cvo` 的 `intent`：`handoff→parked`，`done_notify→resolved`，`fyi` 不改态。  
+死球迟到心跳 grace：`DEAD_BALL_ZOMBIE_GRACE_MS = 600_000`。  
+值班简报读 projection，异常优先。
 
 <a id="pass-hold"></a>
 
-#### hold_ball（先按住，稍后再叫醒我）
+#### hold_ball
 
-**是什么：** MCP 工具 `cat_cafe_hold_ball`——球还是你的，但先睡一小会儿；系统到期自动再叫醒你，并带上你写的「为什么按住 / 醒了干什么」。
+**定锚：** `cat_cafe_hold_ball` 是有界持球：当前猫保持球权，调度一次 `wakeAfterMs` 后的自动再调用；它是例外出口，默认仍应行首 `@` 或 `targetCats` 传球。
 
-**何时用：** 球明确是你的 + 别人帮不上 + **短、可预期**的外部等待（如 CI、远端检查）。  
-**何时不用：** 该 review → `@` 审的人；该别人干 → `@` 那只；「我想想」≠ hold；结论写完必须传出去，不能 hold 当终点。
+**技术密度**
 
-**硬规矩（白话）：**
-- 要调工具才算数；光说「我 hold」→ 虚空持球，系统会提醒
-- 约 1 小时内同一线程同一猫最多 hold 约 3 次，再多必须传球
-- 同一线程同一猫同时只挂 **一个** hold；再调会顶掉旧的
-- 默认出口仍是 `@` 某人；hold 是例外，不是常态
+定义：`packages/mcp-server/src/tools/callback-tools.ts` → `cat_cafe_hold_ball`
+
+| 入参 | 约束 |
+|------|------|
+| `reason` | 为何持球 |
+| `nextStep` | 唤醒后做什么 |
+| `wakeAfterMs` | `5000…3600000`（5s–1h） |
+
+GOTCHA（工具描述）：
+
+- 滚动约 1h 内同 `(thread, cat)` 大约最多 3 次；第 4 次 429 → 必须传球  
+- **单槽**：再 hold 替换未完成的前一次 wake（KD-23）  
+- 仅用于 harness 不可见、不会自动回调的外部等待；已跟踪后台任务完成会自行再 invoke 时不要叠 hold  
+- 纯文本「我 hold」不算：`void-hold-detect` 抓声明无 tool call  
+
+状态机：`ball.held` 多从 `new/active` → 仍 `active`（projector 写 `heldUntil`）；匹配的 `hold_expired` → `dead`。
 
 ---
 
@@ -222,7 +273,7 @@ flowchart LR
 
 ### ③ 调度 — 怎么叫醒、会不会撞车
 
-**定锚：** 活进统一排队再叫猫；用户喊、外部消息、猫互传，插队规则不一样，避免乱撞或饿死某类任务。
+**定锚：** 目标猫确定后，调用进入 `InvocationQueue`；用户消息、连接器唤醒、A2A 续传等来源的 busy gate / 优先级分层不同（F175 / F185），避免乱插队或饿死某类任务。
 
 *（尚无主题小节）* · [回总地图](#1-总地图)
 
@@ -230,9 +281,9 @@ flowchart LR
 
 <a id="vein-memory"></a>
 
-### ④ 记忆 — 团队共用书架
+### ④ 记忆 — 证据与检索
 
-**定锚：** 对话会丢、会话会断；证据 / 教训 / 决策进可检索的书架，需要时再查，而不是每次从头讲。
+**定锚：** 对话会压缩、会话会断；可检索的证据库（evidence）承载跨会话知识，猫按需 `search_evidence` 等接口取用，而不是每次靠全文重讲。
 
 *（尚无主题小节）* · [回总地图](#1-总地图)
 
@@ -240,9 +291,9 @@ flowchart LR
 
 <a id="vein-skills"></a>
 
-### ⑤ 技能与工具 — 说明书和工具箱
+### ⑤ 技能与工具 — Skills 与 MCP
 
-**定锚：** Skills = 按需加载的做事说明书；MCP = 共用工具接口，让不同猫都能回调平台能力。
+**定锚：** Skills 是按需加载的流程说明书（manifest）；MCP 是跨猫共用的工具回调面，平台能力经 MCP / callback 暴露给各 CLI。
 
 *（尚无主题小节）* · [回总地图](#1-总地图)
 
@@ -250,9 +301,9 @@ flowchart LR
 
 <a id="vein-sop"></a>
 
-### ⑥ 纪律 — 怎么一起把事做完
+### ⑥ 纪律 — SOP 与门禁
 
-**定锚：** 固定台阶推进（设计确认 → 实现 → 自检 → 互审 → 合并 → 愿景守护）；尽量跨模型互审，少「自己夸自己」。
+**定锚：** 开发按 SOP 台阶推进（Design Gate → impl → quality-gate → review → merge-gate → 愿景守护）；跨模型互审降低自我放行。
 
 *（尚无主题小节）* · [回总地图](#1-总地图)
 
@@ -262,16 +313,16 @@ flowchart LR
 
 只列标题，点名再挖。禁止在本节写正文。
 
-- [x] ② 传球：大概（机械路由 + 接/退/升 + 现实动作）→ 见 [传球大概](#pass-overview)
-- [x] ② 传球：`@` 解析细则 + 交接上下文字段 → 见 [@ 解析细则](#pass-mention-parse)
-- [x] ② 传球：回退梯 → 见 [回退梯](#pass-fallback)
-- [x] ② 传球：球掉了长啥样 → 见 [球掉了](#pass-dropped)
-- [x] ② 传球：`hold_ball` → 见 [hold_ball](#pass-hold)
-- [ ] ③ 调度：排队与「忙」时谁能插队
-- [ ] ① 身份：配置 / 会话绑定大概长什么样
-- [ ] ④ 记忆：证据怎么进、怎么搜
+- [x] ② 传球：大概 → [传球大概](#pass-overview)
+- [x] ② 传球：`@` 解析 + 交接上下文 → [@ 解析细则](#pass-mention-parse)
+- [x] ② 传球：回退梯 → [回退梯](#pass-fallback)
+- [x] ② 传球：球权状态 → [球权状态](#pass-dropped)
+- [x] ② 传球：`hold_ball` → [hold_ball](#pass-hold)
+- [ ] ③ 调度：InvocationQueue / busy gate / 优先级
+- [ ] ① 身份：roster / 会话绑定
+- [ ] ④ 记忆：索引与检索路径
 - [ ] ⑤ Skills / MCP 一次调用链路
-- [ ] ⑥ SOP 五步和门禁谁卡谁
+- [ ] ⑥ SOP 五步与门禁
 
 ---
 
@@ -279,7 +330,6 @@ flowchart LR
 
 | 日期 | 改了什么 |
 |------|----------|
-| 2026-07-27 | 首版：总地图 + 六脉定锚 + 卡点 + 待展开；三级结构与入库规矩 |
-| 2026-07-27 | ② 传球：新增主题「传球大概」；更新卡点与待展开 |
-| 2026-07-27 | ② 传球：新增「@ 解析细则」（行首/上限2/解析步骤/上下文字段） |
-| 2026-07-27 | ② 传球：新增回退梯 / 球掉了 / hold_ball 三节 |
+| 2026-07-27 | 首版：总地图 + 六脉定锚 + 卡点 + 待展开 |
+| 2026-07-27 | ② 传球：大概 / @解析 / 回退梯 / 掉球 / hold_ball |
+| 2026-07-28 | 约定「一句项目概念定锚 + 技术密度」；按此重写传球章与章级定锚；去掉外部比喻 |
