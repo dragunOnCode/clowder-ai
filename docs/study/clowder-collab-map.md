@@ -93,7 +93,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | 回退：用户@优先 vs A2A 后追问审稿猫 | F194 防抢路由会让「你@Opus→…→Codex审完→你追问」仍叫醒 Opus | 继续细问；或讨论是否该改优先级 / 实操上写 @ |
+| 1 | 球权≠发言；维护=事件流→投影 | 状态机与序列图已写入球权节 | 继续细问图/状态，或开 **③ 调度** |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 调度 / 记忆 / … |
 
 （懂了就删行；整表最多 3 条。）
@@ -280,9 +280,100 @@ Direct message from 缅因猫(codex) [model=…]; reply to 缅因猫(codex)
 
 #### 球权状态（掉球与保管链）
 
-**问题引出：** 路由与 hold 各自有局部刹车，但若只靠扫聊天猜「球在谁手里」，会误判、也会在两次扫描之间掉球且无人知。需要一本**可重建的球权账本**：事件 append-only，投影给出当前态，值班简报读投影而不是启发式考古——回答「球现在算活着、虚空、死了、晾在人手里，还是已了结」。
+**问题引出：** 「谁该接着对这件事负责」若只等于「谁正在说话」，会漏掉：hold 等待中、球晾在人手里、调用已死但名义还在、嘴上说传了系统没动。需要独立于发言流的球权模型，回答责任在谁、形态是否异常。
 
-**定锚：** 球权以 `ball-custody` 事件流为账本、投影为可读状态；异常形态由事件转移产生，不以扫聊天推断为真相源。
+**定锚：** 球权 = **谁该对某个责任单元行动**（`holder` + `BallState`），不是「谁正在发言」。发言/invoke 是执行动作；球权是责任归属的可观测账本。
+
+**球权 ≠ 正在发言**
+
+| | 球权（ball custody） | 发言 / invocation |
+|--|----------------------|-------------------|
+| 问的是 | 责任现在算谁的、形态是否健康 | 这一刻谁在被调用、谁在吐字 |
+| 可以有球但不发言 | 有：`hold_ball` 等待、`parked` 等人、`blocked` 等探针 | — |
+| 可以发言但不是「持球推进」 | 有：愿景守护 cross-post、FYI 知会 | 最后发言者 ≠ 持球者（前面回退缺口即一例） |
+| 真相源 | `BallCustodyEventLog` + 投影 | 消息流 / InvocationTracker |
+
+**状态怎么维护（事件溯源，非直接改状态字段）**
+
+```
+现有系统动作（路由投递 / hold / invocation 终态 / task 变更…）
+    → fire-and-forget BallCustodyIngest.record(event)
+    → EventLog.append（append-only；同 sourceEventId 幂等）
+    → 若 appended:true → Projector.apply
+         → transition(current, event) 纯函数状态机
+         → 写 ProjectionStore（可 rebuild=整段 replay）
+```
+
+- 账本唯一真相：`BallCustodyEventLog`；投影可重建，禁止第二套 canonical  
+- ingest 失败只 log，不堵主流程（观测优先，非账务强一致）  
+- 唤醒投递在 ProbeScheduler/WakeSender，**不**放进 projector（rebuild 安全）
+
+**维护时序（UML 序列图）**
+
+```mermaid
+sequenceDiagram
+  participant Route as 路由/hold/invocation旁路
+  participant Ingest as BallCustodyIngest
+  participant Log as EventLog
+  participant SM as transition()
+  participant Proj as ProjectionStore
+
+  Route->>Ingest: record(event) fire-and-forget
+  Ingest->>Log: append(event)
+  alt 新事件 appended=true
+    Log-->>Ingest: appended
+    Ingest->>SM: transition(current, event)
+    SM-->>Ingest: next state
+    Ingest->>Proj: save projection
+  else 重复 sourceEventId
+    Log-->>Ingest: appended=false
+    Note over Ingest: 不二次 apply，防漂移
+  end
+```
+
+**状态机（UML 状态图，主路径精简）**
+
+```mermaid
+stateDiagram-v2
+  [*] --> new
+  new --> active: ball.handed / ball.held
+  new --> blocked: task.blocked
+  new --> void: ball.void_pass
+
+  active --> active: ball.handed\nball.held\ninvocation.started/heartbeat
+  active --> void: ball.void_pass
+  active --> dead: invocation.died\nball.hold_expired
+  active --> blocked: task.blocked
+  active --> parked: ball.handed_cvo\n(intent=handoff)
+  active --> zombie: task.idle_long
+  active --> resolved: task.done / 安乐死
+
+  blocked --> active: task.unblocked
+  blocked --> blocked: ball.wake_sent
+  blocked --> dead: invocation.died
+  blocked --> zombie: task.idle_long
+  blocked --> resolved: task.done / 安乐死
+
+  parked --> active: ball.handed
+  parked --> void: ball.void_pass
+  parked --> zombie: task.idle_long
+  parked --> resolved: task.done\nhanded_cvo done_notify\n安乐死
+
+  void --> blocked: task.blocked
+  void --> zombie: task.idle_long
+  void --> active: ball.handed
+  void --> resolved: task.done / 安乐死
+
+  dead --> active: ball.handed\nheartbeat(grace内)
+  dead --> resolved: 安乐死
+
+  zombie --> active: ball.handed / task.unblocked
+  zombie --> blocked: task.blocked
+  zombie --> resolved: task.done / 安乐死
+
+  resolved --> active: ball.handed(reopen)
+  resolved --> resolved: task.done
+```
 
 **技术密度**
 
@@ -291,6 +382,7 @@ Direct message from 缅因猫(codex) [model=…]; reply to 缅因猫(codex)
 | Cell | `ball-custody`（F233） |
 | 类型 | `packages/shared/src/types/ball-custody.ts` |
 | 状态机 | `ball-custody-state-machine.ts`（纯函数，零 IO） |
+| 写入 | `BallCustodyIngest.ts` |
 | subjectKey | `ball:thread:{id}` / `ball:task:{id}` |
 
 `BallState`：`new` → `active` | `blocked` | `parked` | `dead` | `void` | `zombie` | `resolved`
@@ -409,4 +501,5 @@ Direct message from 缅因猫(codex) [model=…]; reply to 缅因猫(codex)
 | 2026-07-28 | 升级为三段式：问题引出 → 定锚 → 技术密度 |
 | 2026-07-28 | @解析节补「上下文字段注入」实例 |
 | 2026-07-28 | 回退梯补：最后发言 vs 最近对话可分叉 |
-| 2026-07-28 | 回退梯补对偶缺口：A2A 后无@追问可能仍打到旧 user @，而非刚审完的猫 |
+| 2026-07-28 | 回退梯补对偶缺口：A2A 后无@追问可能仍打到旧 user @ |
+| 2026-07-28 | 球权节：定义≠发言；事件溯源维护；状态机+序列 UML |
