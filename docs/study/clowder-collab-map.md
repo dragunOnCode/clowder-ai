@@ -93,7 +93,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | 球权≠发言；维护=事件流→投影 | 状态机与序列图已写入球权节 | 继续细问图/状态，或开 **③ 调度** |
+| 1 | 账本=EventLog；管理=Ingest/Projector 等分工 | 无单一 BallManager | 继续细问 Redis key / 事件字段，或开调度 |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 调度 / 记忆 / … |
 
 （懂了就删行；整表最多 3 条。）
@@ -385,6 +385,28 @@ stateDiagram-v2
 | 写入 | `BallCustodyIngest.ts` |
 | subjectKey | `ball:thread:{id}` / `ball:task:{id}` |
 
+**「账本」是什么、球权由哪些类管**
+
+账本 ≠ 一张「当前持球人」表。这里的账本 = **按责任单元追加的球权事件流水**（只增不改、不删），接口 `IBallCustodyEventLog`，实现 `RedisBallCustodyEventLog`：
+
+- Redis key 形如 `ballcustody:events:log:{subjectKey}`（LIST）+ 全局 `seen` SET 做 `sourceEventId` 幂等  
+- 一条事件大概是：`kind`（如 `ball.handed`）+ `subjectKey` + `payload`（如 toCatId）+ `at`  
+- **谁现在持球、处于哪一态**不写在账本里改来改去，而由投影算出来
+
+球权**没有**单一 `BallManager` 上帝类，而是按职责拆在 `packages/api/src/domains/ball-custody/`：
+
+| 类 / 模块 | 管什么 |
+|-----------|--------|
+| `ball-custody-events.ts`（`buildHandedEvent` 等） | 从旁路动作**构造**事件 |
+| `BallCustodyIngest` | 写入入口：`append` + 若新事件则 `projector.apply` |
+| `RedisBallCustodyEventLog` | **账本本身**（append-only 真相源） |
+| `transition()`（`ball-custody-state-machine.ts`） | 纯函数：当前态 + 事件 → 下一态 |
+| `BallCustodyProjector` | 读投影 → transition → 字段 effect（holder/heldUntil…）→ 保存 |
+| `RedisBallCustodyProjectionStore` | 投影读写（可 rebuild=replay 账本） |
+| `BallCustodyProbeScheduler` / `WakeSender` | blocked 探针与唤醒（副作用，不进 projector） |
+
+路由等旁路（如 `route-serial`）只 **fire-and-forget** 调 `ingest.record`，自己不改球权状态。
+
 `BallState`：`new` → `active` | `blocked` | `parked` | `dead` | `void` | `zombie` | `resolved`
 
 | 状态 | 含义 | 典型事件 |
@@ -502,4 +524,5 @@ stateDiagram-v2
 | 2026-07-28 | @解析节补「上下文字段注入」实例 |
 | 2026-07-28 | 回退梯补：最后发言 vs 最近对话可分叉 |
 | 2026-07-28 | 回退梯补对偶缺口：A2A 后无@追问可能仍打到旧 user @ |
-| 2026-07-28 | 球权节：定义≠发言；事件溯源维护；状态机+序列 UML |
+| 2026-07-28 | 球权节：定义≠发言；事件溯源；状态机+序列 UML |
+| 2026-07-28 | 球权节：账本=EventLog；类职责表（Ingest/Projector/…） |
