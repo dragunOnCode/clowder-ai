@@ -10,15 +10,27 @@
 2. 再看 [当前卡点](#2-当前卡点)——忘了聊到哪，看这里  
 3. 深挖时进对应脉络章；主题多了会在章内再拆小节  
 
-### 章节写法（固定三段式）
+### 章节写法（推荐四层）
 
-每个主题小节按这个顺序写——**不是**「实现在哪个 `.ts`、被谁 import」那种代码依赖，而是**机制在协作链路里站哪、解什么问题**：
+每个主题尽量按这个顺序——**人话抓住重点，再贴技术标签和类名**：
 
-1. **问题引出 / 系统位置**——从真实协作痛点问出来，落到本机制为什么存在、解决什么（能找到设计意图就写意图）  
-2. **一句定锚**——用项目里的词说明机制是什么（球权、行首 `@`、`targetCats`、`hold_ball`…）；不用外部比喻  
-3. **技术密度**——文件路径、常量、字段、状态/事件、实现顺序；够对照代码  
+1. **概念**——机制是什么、解决什么问题（用项目词：球权、责任单元、行首 `@`…）  
+2. **怎么维护 / 怎么运转**——在系统里靠什么更新、谁读谁写（仍用人话流程）  
+3. **技术命名**——把上一步里的东西对上术语（账本 = append-only 事件日志；投影 = 由日志推导的当前快照…）  
+4. **类 / 模块**——`packages/...` 里谁负责哪一段  
 
-脉络章开头同样：先「整章在六脉里解什么问题」，再章级定锚，再链到主题小节。
+仍保留「问题引出」时可放在概念之前；防术语套术语：每一层里**先说完人话再括号标术语**。
+
+脉络章开头：整章解什么问题 → 章级定锚 → 链到主题小节。
+
+### 防「用新概念解释概念」
+
+| 做法 | 例 |
+|------|-----|
+| ✅ | 「只追加的历史流水（**事件日志 EventLog**）→ 算出当前快照（**投影 Projection**）」 |
+| ❌ | 「投影是事件溯源的物化读模型」 |
+
+本图已出现的词优先复用。新术语首次出现必须带一句人话释义。
 
 ### 入库规矩
 
@@ -93,7 +105,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | 传球章已改「问题引出 → 定锚 → 密度」 | 写法刚升级 | 问题链是否顺；或开 **③ 调度** |
+| 1 | 写法定为四层：概念→维护→术语→类 | 球权节已作示范 | 继续细问，或开调度 |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 调度 / 记忆 / … |
 
 （懂了就删行；整表最多 3 条。）
@@ -171,6 +183,41 @@ flowchart LR
 
 **定锚：** 文本路径只把「行首 `@` + mentionPatterns 命中」当成可路由提及；消息正文没有交接 XML tag，交接语义靠调用上下文字段注入 system prompt。
 
+**实例：这句话到底在说什么**
+
+「上下文字段」= 平台在**发起这次调用之前**填进 `InvocationContext` 的结构化字段（如 `directMessageFrom`），不是聊天气泡里的特殊标记。  
+「注入 system prompt」= `SystemPromptBuilder` 把字段渲染成 prompt 文本，塞进本次 invoke 的系统侧提示，给**被叫醒的那只猫的 LLM**读。
+
+分工：
+
+| 步骤 | 谁做 | 要不要 LLM |
+|------|------|------------|
+| 解析行首 `@`、决定叫醒谁、写入 `directMessageFrom` 等 | 平台代码 | 否 |
+| 渲染 D2/D4/D5 段进 system prompt | 平台代码 | 否 |
+| 读到「Direct message from …；reply to …」后决定怎么回、是否再 `@` | 被叫醒的猫（LLM） | **是** |
+
+例：缅因 `codex` 行首 `@opus` 把球传给布偶。串行路由里（`route-serial.ts`）会带上大致这样的上下文对象字段：
+
+```ts
+{
+  catId: 'opus',                 // 被叫醒的是谁
+  directMessageFrom: 'codex',    // A2A：前手是缅因（用户→猫时通常没有这个字段）
+  mode: 'serial',
+  chainIndex: 2,
+  chainTotal: 2,
+  a2aEnabled: true,
+  // 可选：pingPongWarning / crossThreadReplyHint / teammates …
+}
+```
+
+渲染进 prompt 后，布偶这次调用的系统侧会出现类似一行（测试断言同款）：
+
+```text
+Direct message from 缅因猫(codex) [model=…]; reply to 缅因猫(codex)
+```
+
+因此：交接的**路由与字段填充是系统内部**；交接的**语义理解与行为（回给谁、接/退/升）要靠 LLM 读这段 prompt**。没有字段时，猫仍能看见线程消息，但缺少机器保证的「这是点名交来的」提示。
+
 **技术密度 — 解析**
 
 文件：`packages/api/src/domains/cats/services/agents/routing/a2a-mentions.ts`
@@ -222,22 +269,142 @@ flowchart LR
 4. **最后健康回复者**（`lastResponseHealthy !== false`）  
 5. 偏好猫 / 任意健康参与者 / `getDefaultCatId()` 兜底  
 
+**「最后发言的猫」和「最近一次对话的猫」可以不一致。**  
+前者看线程时间线上谁最后开口（含猫↔猫 A2A、愿景守护 cross-post 等）；后者以**人的消息**为准（最近 user 消息里 `@` 过谁）。典型分叉：
+
+| 时间线 | 线程最后发言 | 人最近在跟谁 | 你再不写 `@` 时优先叫醒谁 |
+|--------|--------------|--------------|---------------------------|
+| 你 `@布偶` → 布偶回 → 缅因因愿景守护/跨贴又发了一条 | 缅因 | 布偶（你上次 `@` 的） | **布偶**（用户提及 fallback 优先于最后回复者） |
+| 布偶 `@缅因` review，缅因刚回完；你上一条 `@` 仍是布偶且在 1h/5 条窗内 | 缅因 | 仍可能是布偶（只看 user 消息里的 `@`） | **布偶**（窗内还能扫到那次 user `@`） |
+| 窗内找不到带 `@` 的 user 消息 | （某只猫） | 含糊 | 才退到 **最后健康回复者** |
+
+代码注释心智：`no @ = 继续刚才 @ 的猫里的一只`，**不是** `thread 里最近发言的猫`（F194；曾出现「明明 at 的是 47/55，却叫醒了 46」）。
+
+**对偶缺口（已知张力）：** F194 把「用户提及」放在「最后回复者」之前，是为了挡住无关的最后发言（愿景守护 / cross-post）抢路由。但若链是：
+
+`你 @Opus 写需求 → Opus @Codex 检视 → Codex 说没问题 → 你不写 @ 追问「废弃变量为啥没看出来」`
+
+则窗内最近一次 **user `@` 仍是 Opus**，回退会优先叫醒 **Opus**，而不是刚做完检视的 **Codex**。  
+人的心智更像 F078「接着跟刚聊完/刚干活的那只」；现行实现在「防抢路由」和「A2A 后追问审稿猫」之间偏了前者。  
+（球权账本里球可能已在 Codex；**叫醒谁**仍走上述回退梯——两件事不要混。）
+
 <a id="pass-dropped"></a>
 
 #### 球权状态（掉球与保管链）
 
-**问题引出：** 路由与 hold 各自有局部刹车，但若只靠扫聊天猜「球在谁手里」，会误判、也会在两次扫描之间掉球且无人知。需要一本**可重建的球权账本**：事件 append-only，投影给出当前态，值班简报读投影而不是启发式考古——回答「球现在算活着、虚空、死了、晾在人手里，还是已了结」。
+**问题引出：** 「谁该接着负责」若只等于「谁正在说话」，会漏掉 hold 等待、球晾在人手里、调用已死、嘴上说传了系统没动。需要独立于发言流的责任模型。
 
-**定锚：** 球权以 `ball-custody` 事件流为账本、投影为可读状态；异常形态由事件转移产生，不以扫聊天推断为真相源。
+---
 
-**技术密度**
+**① 概念**  
+球权 = **谁该对某个责任单元行动**（线程 `ball:thread:{id}` 或任务 `ball:task:{id}`）。  
+记录两件事：持球人 `holder`、形态 `BallState`（active / void / dead / …）。  
+**不是**「谁正在发言」——可以持球不说话（hold），也可以说话但不持球（cross-post）。
 
-| 锚 | 路径 |
-|----|------|
-| Cell | `ball-custody`（F233） |
-| 类型 | `packages/shared/src/types/ball-custody.ts` |
-| 状态机 | `ball-custody-state-machine.ts`（纯函数，零 IO） |
-| subjectKey | `ball:thread:{id}` / `ball:task:{id}` |
+**② 怎么维护**  
+不靠改一张「当前持球人」表，而是：
+
+1. 系统里发生真实动作（行首 `@` 投递、hold、invocation 死掉、task 阻塞…）  
+2. 旁路记一条**只追加**的历史记录  
+3. 用状态机规则，把「上一条快照 + 新记录」算成**新的当前快照**  
+4. 值班简报等只读「当前快照」，不扫聊天记录猜  
+
+快照坏了 → 把历史记录从头重放一遍即可恢复（rebuild）。
+
+**③ 技术命名**
+
+| 人话 | 术语 | 要点 |
+|------|------|------|
+| 历史流水、只增不改 | **事件日志**（EventLog，文档里也叫账本） | 真相源；`sourceEventId` 幂等 |
+| 由流水算出的「现在谁负责、什么态」 | **投影**（Projection） | 可丢弃、可重建；不是第二套权威 |
+| 快照 + 新事件 → 下一态 | **状态机** `transition()` | 纯函数，无 IO |
+| 路由旁路写入 | **ingest** `record(event)` | fire-and-forget，失败不堵主流程 |
+
+**④ 类 / 模块**（`packages/api/src/domains/ball-custody/`）
+
+| 类 | 干什么 |
+|----|--------|
+| `ball-custody-events.ts` | 把动作包装成 `BallCustodyEvent` |
+| `BallCustodyIngest` | 写入口：append 日志 → 新事件则更新投影 |
+| `RedisBallCustodyEventLog` | 存事件日志（Redis LIST + seen SET） |
+| `ball-custody-state-machine.ts` → `transition()` | 状态转移规则 |
+| `BallCustodyProjector` | 读旧投影 → transition → 写 `holder`/`state`/… |
+| `RedisBallCustodyProjectionStore` | 存投影快照 |
+| `BallCustodyProbeScheduler` / `WakeSender` | blocked 探针与唤醒（副作用，不进 Projector） |
+
+类型定义：`packages/shared/src/types/ball-custody.ts`。  
+路由等（`route-serial`）只调 `ingest.record`，自己不改投影。
+
+---
+
+**维护时序（UML）**
+
+```mermaid
+sequenceDiagram
+  participant Route as 路由/hold/invocation旁路
+  participant Ingest as BallCustodyIngest
+  participant Log as EventLog
+  participant SM as transition()
+  participant Proj as ProjectionStore
+
+  Route->>Ingest: record(event) fire-and-forget
+  Ingest->>Log: append(event)
+  alt 新事件 appended=true
+    Log-->>Ingest: appended
+    Ingest->>SM: transition(current, event)
+    SM-->>Ingest: next state
+    Ingest->>Proj: save projection
+  else 重复 sourceEventId
+    Log-->>Ingest: appended=false
+    Note over Ingest: 不二次 apply，防漂移
+  end
+```
+
+**状态机（UML 状态图，主路径精简）**
+
+```mermaid
+stateDiagram-v2
+  [*] --> new
+  new --> active: ball.handed / ball.held
+  new --> blocked: task.blocked
+  new --> void: ball.void_pass
+
+  active --> active: ball.handed\nball.held\ninvocation.started/heartbeat
+  active --> void: ball.void_pass
+  active --> dead: invocation.died\nball.hold_expired
+  active --> blocked: task.blocked
+  active --> parked: ball.handed_cvo\n(intent=handoff)
+  active --> zombie: task.idle_long
+  active --> resolved: task.done / 安乐死
+
+  blocked --> active: task.unblocked
+  blocked --> blocked: ball.wake_sent
+  blocked --> dead: invocation.died
+  blocked --> zombie: task.idle_long
+  blocked --> resolved: task.done / 安乐死
+
+  parked --> active: ball.handed
+  parked --> void: ball.void_pass
+  parked --> zombie: task.idle_long
+  parked --> resolved: task.done\nhanded_cvo done_notify\n安乐死
+
+  void --> blocked: task.blocked
+  void --> zombie: task.idle_long
+  void --> active: ball.handed
+  void --> resolved: task.done / 安乐死
+
+  dead --> active: ball.handed\nheartbeat(grace内)
+  dead --> resolved: 安乐死
+
+  zombie --> active: ball.handed / task.unblocked
+  zombie --> blocked: task.blocked
+  zombie --> resolved: task.done / 安乐死
+
+  resolved --> active: ball.handed(reopen)
+  resolved --> resolved: task.done
+```
+
+**状态一览**
 
 `BallState`：`new` → `active` | `blocked` | `parked` | `dead` | `void` | `zombie` | `resolved`
 
@@ -252,31 +419,76 @@ flowchart LR
 | resolved | 完成或安乐死 | `task.done`；`ball.frozen/degraded/abandoned` |
 
 `handed_cvo` intent：`handoff→parked`，`done_notify→resolved`，`fyi` 不改态。  
-`DEAD_BALL_ZOMBIE_GRACE_MS = 600_000`。简报读 projection，异常优先。
+`DEAD_BALL_ZOMBIE_GRACE_MS = 600_000`。
 
 <a id="pass-hold"></a>
 
 #### hold_ball
 
-**问题引出：** 有时球仍属于当前猫，但必须短等一个**外部、可预期**条件（如远端 CI），此时既不该空传给别人，也不能结束回合后永远没人再叫醒你。`hold_ball` 回答：如何**有界持球并预约一次自动再调用**——同时防止「我想想也 hold」、防止和已有自动回调叠床架屋。
+**问题引出：** 球仍属当前猫，但必须短等外部条件（CI 等）。不能空传给别人，也不能回合结束后永远没人再叫醒。
 
-**定锚：** `cat_cafe_hold_ball` 是有界持球：当前猫保持球权，调度一次 `wakeAfterMs` 后的自动再调用；例外出口，默认仍应行首 `@` 或 `targetCats` 传球。
+---
 
-**技术密度**
+**① 概念**  
+`cat_cafe_hold_ball` = **有界持球**：球还在你手里，但本轮先结束；平台在 `wakeAfterMs` 后**再叫醒你一次**（带 reason / nextStep 上下文）。  
+默认出口仍是行首 `@` 传球；hold 是例外。
 
-定义：`packages/mcp-server/src/tools/callback-tools.ts` → `cat_cafe_hold_ball`
+**② hold 期间系统处于什么状态？会不会调 CLI？**
 
-| 入参 | 约束 |
+分三条线看（不要混成「正在说话」）：
+
+| 维度 | hold 等待中 | 到期唤醒时 |
+|------|-------------|------------|
+| **球权投影** | 通常仍 `active`；`holder` = 持球猫；`heldUntil` = 到期时间（`ball.held` 事件） | 唤醒任务触发；可能记 `ball.hold_expired`（与 `heldUntil` 匹配时 → 可转 `dead`，若随后再 invoke 可恢复） |
+| **Invocation（本次调用）** | **已结束**——猫调完 hold_ball 工具后，当前回合/调用收尾，**等待期间没有 CLI 在跑** | **新建一次 Invocation** → 进队列 → **再起 CLI** |
+| **调度器** | 注册一条 `hold-ball-*` 定时任务（`reminder` 模板），`fireAt = now + wakeAfterMs` | `reminder` 执行：往 thread 发唤醒消息 → `invokeTrigger.trigger(...)` |
+
+所以：**hold 等待 = 球还在你名下 + 定时器挂着 + 当前 invocation 已停；不是「CLI 一直开着傻等」。**  
+若 thread 正忙，唤醒可 `deferWhileThreadBusy` 顺延。用户新发消息可取消 pending hold（F167 Phase J）。
+
+**③ 技术命名**
+
+- 持球登记：`POST /api/callbacks/hold-ball`（`callback-hold-ball-routes.ts`）  
+- 定时唤醒：`reminder` 模板 + `TaskRunnerV2.registerDynamic`  
+- 球权旁路：`buildHeldEvent` → `BallCustodyIngest.record`  
+- MCP 入口：`handleHoldBall` → `callback-tools.ts`
+
+**④ 类 / 路由**
+
+| 组件 | 作用 |
 |------|------|
-| `reason` | 为何持球 |
-| `nextStep` | 唤醒后做什么 |
-| `wakeAfterMs` | `5000…3600000`（5s–1h） |
+| `handleHoldBall` / `callback-hold-ball-routes.ts` | 校验、登记定时任务、记 `ball.held`、线程可见消息 |
+| `reminderTemplate`（`scheduler/templates/reminder.ts`） | 到点发消息 + `invokeTrigger.trigger` 再叫醒猫 |
+| `BallCustodyIngest` + `buildHeldEvent` | 投影里写 holder / heldUntil |
+| `hold-ball-cancel.ts` | 用户消息时取消 pending hold |
 
-- 约 1h 内同 `(thread, cat)` 大约最多 3 次；第 4 次 429 → 必须传球  
-- **单槽**：再 hold 替换未完成的前一次 wake（KD-23）  
-- 仅用于 harness 不可见、不会自动回调的外部等待  
-- 纯文本「我 hold」不算 → `void-hold-detect`  
-- 状态机：`ball.held` → 常仍 `active` + `heldUntil`；匹配 `hold_expired` → `dead`  
+约束：`wakeAfterMs` 5s–1h；约 1h 内同 `(thread,cat)` 最多 3 次 hold；单槽（新 hold 顶掉旧 wake）。
+
+---
+
+#### 基础概念：thread 与 invocation
+
+**问题引出：** 消息挂在哪、一次「叫醒猫干活」怎么记账，需要两个不同粒度的容器。
+
+**① 概念**
+
+| | **Thread（线程）** | **Invocation（调用）** |
+|--|-------------------|------------------------|
+| 人话 | 一条**对话线** / 房间：消息按时间堆在这里 | **一次**「叫醒某猫处理某事」的执行周期 |
+| 生命周期 | 长；可跨很多轮人机/猫猫对话 | 短；`queued → running → succeeded/failed` |
+| 典型内容 | 消息列表、参与者、路由偏好、球权 `ball:thread:{id}` | 这次叫醒谁（`targetCats`）、关联哪条用户消息、状态与 token 用量 |
+
+**② 怎么维护**  
+- Thread：`ThreadStore` 管元数据与参与者；`MessageStore` 存消息。  
+- Invocation：`InvocationRecordStore` 管单次调用状态机（ADR-008）；一次用户消息或定时唤醒可创建一条 record，再驱动 CLI。
+
+**③ 技术命名**  
+`ThreadId` / `InvocationRecord` / `InvocationStatus`（`queued` | `running` | `succeeded` | `failed` | `canceled`）
+
+**④ 类**  
+`ThreadStore.ts` · `InvocationRecordStore.ts` · 路由侧 `InvocationQueue` / `route-serial` 创建并消费 invocation。
+
+**和 hold 的关系：** hold 挂在某个 **thread** 上；等待期没有活跃 **invocation**；到期在**同一条 thread** 里触发**新的 invocation** 再起 CLI。
 
 ---
 
@@ -352,4 +564,11 @@ flowchart LR
 | 2026-07-27 | 首版：总地图 + 六脉定锚 + 卡点 + 待展开 |
 | 2026-07-27 | ② 传球：大概 / @解析 / 回退梯 / 掉球 / hold_ball |
 | 2026-07-28 | 「一句定锚 + 技术密度」；去掉外部比喻 |
-| 2026-07-28 | 升级为三段式：问题引出（系统位置/解什么问题）→ 定锚 → 技术密度；重写传球与各章章首 |
+| 2026-07-28 | 升级为三段式：问题引出 → 定锚 → 技术密度 |
+| 2026-07-28 | @解析节补「上下文字段注入」实例 |
+| 2026-07-28 | 回退梯补：最后发言 vs 最近对话可分叉 |
+| 2026-07-28 | 回退梯补对偶缺口：A2A 后无@追问可能仍打到旧 user @ |
+| 2026-07-28 | 球权节：定义≠发言；事件溯源；状态机+序列 UML |
+| 2026-07-28 | 球权节：账本=EventLog；类职责表 |
+| 2026-07-29 | 投影=当前快照；防新概念套概念 |
+| 2026-07-29 | 写法升级为四层（概念/维护/术语/类）；球权节按四层重写 |
