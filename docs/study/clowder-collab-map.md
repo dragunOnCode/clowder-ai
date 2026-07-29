@@ -425,25 +425,70 @@ stateDiagram-v2
 
 #### hold_ball
 
-**问题引出：** 有时球仍属于当前猫，但必须短等一个**外部、可预期**条件（如远端 CI），此时既不该空传给别人，也不能结束回合后永远没人再叫醒你。`hold_ball` 回答：如何**有界持球并预约一次自动再调用**——同时防止「我想想也 hold」、防止和已有自动回调叠床架屋。
+**问题引出：** 球仍属当前猫，但必须短等外部条件（CI 等）。不能空传给别人，也不能回合结束后永远没人再叫醒。
 
-**定锚：** `cat_cafe_hold_ball` 是有界持球：当前猫保持球权，调度一次 `wakeAfterMs` 后的自动再调用；例外出口，默认仍应行首 `@` 或 `targetCats` 传球。
+---
 
-**技术密度**
+**① 概念**  
+`cat_cafe_hold_ball` = **有界持球**：球还在你手里，但本轮先结束；平台在 `wakeAfterMs` 后**再叫醒你一次**（带 reason / nextStep 上下文）。  
+默认出口仍是行首 `@` 传球；hold 是例外。
 
-定义：`packages/mcp-server/src/tools/callback-tools.ts` → `cat_cafe_hold_ball`
+**② hold 期间系统处于什么状态？会不会调 CLI？**
 
-| 入参 | 约束 |
+分三条线看（不要混成「正在说话」）：
+
+| 维度 | hold 等待中 | 到期唤醒时 |
+|------|-------------|------------|
+| **球权投影** | 通常仍 `active`；`holder` = 持球猫；`heldUntil` = 到期时间（`ball.held` 事件） | 唤醒任务触发；可能记 `ball.hold_expired`（与 `heldUntil` 匹配时 → 可转 `dead`，若随后再 invoke 可恢复） |
+| **Invocation（本次调用）** | **已结束**——猫调完 hold_ball 工具后，当前回合/调用收尾，**等待期间没有 CLI 在跑** | **新建一次 Invocation** → 进队列 → **再起 CLI** |
+| **调度器** | 注册一条 `hold-ball-*` 定时任务（`reminder` 模板），`fireAt = now + wakeAfterMs` | `reminder` 执行：往 thread 发唤醒消息 → `invokeTrigger.trigger(...)` |
+
+所以：**hold 等待 = 球还在你名下 + 定时器挂着 + 当前 invocation 已停；不是「CLI 一直开着傻等」。**  
+若 thread 正忙，唤醒可 `deferWhileThreadBusy` 顺延。用户新发消息可取消 pending hold（F167 Phase J）。
+
+**③ 技术命名**
+
+- 持球登记：`POST /api/callbacks/hold-ball`（`callback-hold-ball-routes.ts`）  
+- 定时唤醒：`reminder` 模板 + `TaskRunnerV2.registerDynamic`  
+- 球权旁路：`buildHeldEvent` → `BallCustodyIngest.record`  
+- MCP 入口：`handleHoldBall` → `callback-tools.ts`
+
+**④ 类 / 路由**
+
+| 组件 | 作用 |
 |------|------|
-| `reason` | 为何持球 |
-| `nextStep` | 唤醒后做什么 |
-| `wakeAfterMs` | `5000…3600000`（5s–1h） |
+| `handleHoldBall` / `callback-hold-ball-routes.ts` | 校验、登记定时任务、记 `ball.held`、线程可见消息 |
+| `reminderTemplate`（`scheduler/templates/reminder.ts`） | 到点发消息 + `invokeTrigger.trigger` 再叫醒猫 |
+| `BallCustodyIngest` + `buildHeldEvent` | 投影里写 holder / heldUntil |
+| `hold-ball-cancel.ts` | 用户消息时取消 pending hold |
 
-- 约 1h 内同 `(thread, cat)` 大约最多 3 次；第 4 次 429 → 必须传球  
-- **单槽**：再 hold 替换未完成的前一次 wake（KD-23）  
-- 仅用于 harness 不可见、不会自动回调的外部等待  
-- 纯文本「我 hold」不算 → `void-hold-detect`  
-- 状态机：`ball.held` → 常仍 `active` + `heldUntil`；匹配 `hold_expired` → `dead`  
+约束：`wakeAfterMs` 5s–1h；约 1h 内同 `(thread,cat)` 最多 3 次 hold；单槽（新 hold 顶掉旧 wake）。
+
+---
+
+#### 基础概念：thread 与 invocation
+
+**问题引出：** 消息挂在哪、一次「叫醒猫干活」怎么记账，需要两个不同粒度的容器。
+
+**① 概念**
+
+| | **Thread（线程）** | **Invocation（调用）** |
+|--|-------------------|------------------------|
+| 人话 | 一条**对话线** / 房间：消息按时间堆在这里 | **一次**「叫醒某猫处理某事」的执行周期 |
+| 生命周期 | 长；可跨很多轮人机/猫猫对话 | 短；`queued → running → succeeded/failed` |
+| 典型内容 | 消息列表、参与者、路由偏好、球权 `ball:thread:{id}` | 这次叫醒谁（`targetCats`）、关联哪条用户消息、状态与 token 用量 |
+
+**② 怎么维护**  
+- Thread：`ThreadStore` 管元数据与参与者；`MessageStore` 存消息。  
+- Invocation：`InvocationRecordStore` 管单次调用状态机（ADR-008）；一次用户消息或定时唤醒可创建一条 record，再驱动 CLI。
+
+**③ 技术命名**  
+`ThreadId` / `InvocationRecord` / `InvocationStatus`（`queued` | `running` | `succeeded` | `failed` | `canceled`）
+
+**④ 类**  
+`ThreadStore.ts` · `InvocationRecordStore.ts` · 路由侧 `InvocationQueue` / `route-serial` 创建并消费 invocation。
+
+**和 hold 的关系：** hold 挂在某个 **thread** 上；等待期没有活跃 **invocation**；到期在**同一条 thread** 里触发**新的 invocation** 再起 CLI。
 
 ---
 
