@@ -10,26 +10,27 @@
 2. 再看 [当前卡点](#2-当前卡点)——忘了聊到哪，看这里  
 3. 深挖时进对应脉络章；主题多了会在章内再拆小节  
 
-### 章节写法（固定三段式）
+### 章节写法（推荐四层）
 
-每个主题小节按这个顺序写——**不是**「实现在哪个 `.ts`、被谁 import」那种代码依赖，而是**机制在协作链路里站哪、解什么问题**：
+每个主题尽量按这个顺序——**人话抓住重点，再贴技术标签和类名**：
 
-1. **问题引出 / 系统位置**——从真实协作痛点问出来，落到本机制为什么存在、解决什么（能找到设计意图就写意图）  
-2. **一句定锚**——用项目里的词说明机制是什么（球权、行首 `@`、`targetCats`、`hold_ball`…）；不用外部比喻  
-3. **技术密度**——文件路径、常量、字段、状态/事件、实现顺序；够对照代码  
+1. **概念**——机制是什么、解决什么问题（用项目词：球权、责任单元、行首 `@`…）  
+2. **怎么维护 / 怎么运转**——在系统里靠什么更新、谁读谁写（仍用人话流程）  
+3. **技术命名**——把上一步里的东西对上术语（账本 = append-only 事件日志；投影 = 由日志推导的当前快照…）  
+4. **类 / 模块**——`packages/...` 里谁负责哪一段  
 
-脉络章开头同样：先「整章在六脉里解什么问题」，再章级定锚，再链到主题小节。
+仍保留「问题引出」时可放在概念之前；防术语套术语：每一层里**先说完人话再括号标术语**。
+
+脉络章开头：整章解什么问题 → 章级定锚 → 链到主题小节。
 
 ### 防「用新概念解释概念」
 
-抓重点用这条：**先只用读者已经听过的词把事说完，专有名词最后当标签贴上。**
-
 | 做法 | 例 |
 |------|-----|
-| ✅ 旧词说完 → 括号标术语 | 「把流水账从头加一遍，得到一张『现在谁负责、什么状态』的快照——这张快照就叫投影」 |
-| ❌ 术语套术语 | 「投影是事件溯源里对聚合的物化读模型」 |
+| ✅ | 「只追加的历史流水（**事件日志 EventLog**）→ 算出当前快照（**投影 Projection**）」 |
+| ❌ | 「投影是事件溯源的物化读模型」 |
 
-本图已出现的「已知词」优先复用：球权、责任、谁该动手、流水账/事件列表、当前状态、持球人、叫醒、行首 `@`。新词首次出现必须带一句旧词释义。
+本图已出现的词优先复用。新术语首次出现必须带一句人话释义。
 
 ### 入库规矩
 
@@ -104,7 +105,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | 投影=当前球权快照；已定「旧词优先」写法 | 防术语套术语 | 继续细问，或开调度 |
+| 1 | 写法定为四层：概念→维护→术语→类 | 球权节已作示范 | 继续细问，或开调度 |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 调度 / 记忆 / … |
 
 （懂了就删行；整表最多 3 条。）
@@ -291,35 +292,52 @@ Direct message from 缅因猫(codex) [model=…]; reply to 缅因猫(codex)
 
 #### 球权状态（掉球与保管链）
 
-**问题引出：** 「谁该接着对这件事负责」若只等于「谁正在说话」，会漏掉：hold 等待中、球晾在人手里、调用已死但名义还在、嘴上说传了系统没动。需要独立于发言流的球权模型，回答责任在谁、形态是否异常。
+**问题引出：** 「谁该接着负责」若只等于「谁正在说话」，会漏掉 hold 等待、球晾在人手里、调用已死、嘴上说传了系统没动。需要独立于发言流的责任模型。
 
-**定锚：** 球权 = **谁该对某个责任单元行动**（`holder` + `BallState`），不是「谁正在发言」。发言/invoke 是执行动作；球权是责任归属的可观测账本。
+---
 
-**球权 ≠ 正在发言**
+**① 概念**  
+球权 = **谁该对某个责任单元行动**（线程 `ball:thread:{id}` 或任务 `ball:task:{id}`）。  
+记录两件事：持球人 `holder`、形态 `BallState`（active / void / dead / …）。  
+**不是**「谁正在发言」——可以持球不说话（hold），也可以说话但不持球（cross-post）。
 
-| | 球权（ball custody） | 发言 / invocation |
-|--|----------------------|-------------------|
-| 问的是 | 责任现在算谁的、形态是否健康 | 这一刻谁在被调用、谁在吐字 |
-| 可以有球但不发言 | 有：`hold_ball` 等待、`parked` 等人、`blocked` 等探针 | — |
-| 可以发言但不是「持球推进」 | 有：愿景守护 cross-post、FYI 知会 | 最后发言者 ≠ 持球者（前面回退缺口即一例） |
-| 真相源 | `BallCustodyEventLog` + 投影 | 消息流 / InvocationTracker |
+**② 怎么维护**  
+不靠改一张「当前持球人」表，而是：
 
-**状态怎么维护（事件溯源，非直接改状态字段）**
+1. 系统里发生真实动作（行首 `@` 投递、hold、invocation 死掉、task 阻塞…）  
+2. 旁路记一条**只追加**的历史记录  
+3. 用状态机规则，把「上一条快照 + 新记录」算成**新的当前快照**  
+4. 值班简报等只读「当前快照」，不扫聊天记录猜  
 
-```
-现有系统动作（路由投递 / hold / invocation 终态 / task 变更…）
-    → fire-and-forget BallCustodyIngest.record(event)
-    → EventLog.append（append-only；同 sourceEventId 幂等）
-    → 若 appended:true → Projector.apply
-         → transition(current, event) 纯函数状态机
-         → 写 ProjectionStore（可 rebuild=整段 replay）
-```
+快照坏了 → 把历史记录从头重放一遍即可恢复（rebuild）。
 
-- 账本唯一真相：`BallCustodyEventLog`；投影可重建，禁止第二套 canonical  
-- ingest 失败只 log，不堵主流程（观测优先，非账务强一致）  
-- 唤醒投递在 ProbeScheduler/WakeSender，**不**放进 projector（rebuild 安全）
+**③ 技术命名**
 
-**维护时序（UML 序列图）**
+| 人话 | 术语 | 要点 |
+|------|------|------|
+| 历史流水、只增不改 | **事件日志**（EventLog，文档里也叫账本） | 真相源；`sourceEventId` 幂等 |
+| 由流水算出的「现在谁负责、什么态」 | **投影**（Projection） | 可丢弃、可重建；不是第二套权威 |
+| 快照 + 新事件 → 下一态 | **状态机** `transition()` | 纯函数，无 IO |
+| 路由旁路写入 | **ingest** `record(event)` | fire-and-forget，失败不堵主流程 |
+
+**④ 类 / 模块**（`packages/api/src/domains/ball-custody/`）
+
+| 类 | 干什么 |
+|----|--------|
+| `ball-custody-events.ts` | 把动作包装成 `BallCustodyEvent` |
+| `BallCustodyIngest` | 写入口：append 日志 → 新事件则更新投影 |
+| `RedisBallCustodyEventLog` | 存事件日志（Redis LIST + seen SET） |
+| `ball-custody-state-machine.ts` → `transition()` | 状态转移规则 |
+| `BallCustodyProjector` | 读旧投影 → transition → 写 `holder`/`state`/… |
+| `RedisBallCustodyProjectionStore` | 存投影快照 |
+| `BallCustodyProbeScheduler` / `WakeSender` | blocked 探针与唤醒（副作用，不进 Projector） |
+
+类型定义：`packages/shared/src/types/ball-custody.ts`。  
+路由等（`route-serial`）只调 `ingest.record`，自己不改投影。
+
+---
+
+**维护时序（UML）**
 
 ```mermaid
 sequenceDiagram
@@ -386,46 +404,7 @@ stateDiagram-v2
   resolved --> resolved: task.done
 ```
 
-**技术密度**
-
-| 锚 | 路径 |
-|----|------|
-| Cell | `ball-custody`（F233） |
-| 类型 | `packages/shared/src/types/ball-custody.ts` |
-| 状态机 | `ball-custody-state-machine.ts`（纯函数，零 IO） |
-| 写入 | `BallCustodyIngest.ts` |
-| subjectKey | `ball:thread:{id}` / `ball:task:{id}` |
-
-**「账本」和「投影」——先用旧词**
-
-球权要同时满足两件事：
-
-1. **事后能查清发生过什么** → 需要一份只往上加、不改历史的记录（交出去、hold、调用挂了…）  
-2. **现在要一眼看到谁负责、什么状态** → 若每次都从头把整份记录加一遍太慢，所以另存一张「算到现在」的结果表  
-
-| 人话 | 文档里的标签 | 对应类 |
-|------|--------------|--------|
-| 只追加的历史流水（发生过什么） | 常称**账本** / EventLog | `RedisBallCustodyEventLog` |
-| 「算到现在」的结果：谁持球、哪一态 | 常称**投影** / Projection | `BallCustodyProjector` 算出来，存进 `RedisBallCustodyProjectionStore` |
-
-所以：**投影 = 根据历史流水算出来、并缓存下来的「当前球权快照」**（里面有 `holder`、`state`、`heldUntil` 等）。  
-值班简报读的是这张快照；快照坏了或要核对，可以把流水从头重放再算一遍（rebuild）。
-
-不是：另有一套人改的「权威当前表」。权威历史在流水里；快照可以丢了重算。
-
-球权**没有**单一 `BallManager`，分工在 `packages/api/src/domains/ball-custody/`：
-
-| 类 / 模块 | 人话 |
-|-----------|------|
-| `ball-custody-events.ts` | 把系统动作写成一条流水记录 |
-| `BallCustodyIngest` | 写入入口：先记流水，新记录才更新快照 |
-| `RedisBallCustodyEventLog` | 存历史流水 |
-| `transition()` | 已知「当前态 + 新记录」→ 下一态 |
-| `BallCustodyProjector` | 更新快照（holder/state 等） |
-| `RedisBallCustodyProjectionStore` | 存快照 |
-| `ProbeScheduler` / `WakeSender` | 该叫醒谁时去叫醒（不写进快照逻辑里） |
-
-路由等只旁路调用 `ingest.record`，自己不改球权快照。
+**状态一览**
 
 `BallState`：`new` → `active` | `blocked` | `parked` | `dead` | `void` | `zombie` | `resolved`
 
@@ -440,7 +419,7 @@ stateDiagram-v2
 | resolved | 完成或安乐死 | `task.done`；`ball.frozen/degraded/abandoned` |
 
 `handed_cvo` intent：`handoff→parked`，`done_notify→resolved`，`fyi` 不改态。  
-`DEAD_BALL_ZOMBIE_GRACE_MS = 600_000`。简报读 projection，异常优先。
+`DEAD_BALL_ZOMBIE_GRACE_MS = 600_000`。
 
 <a id="pass-hold"></a>
 
@@ -546,4 +525,5 @@ stateDiagram-v2
 | 2026-07-28 | 回退梯补对偶缺口：A2A 后无@追问可能仍打到旧 user @ |
 | 2026-07-28 | 球权节：定义≠发言；事件溯源；状态机+序列 UML |
 | 2026-07-28 | 球权节：账本=EventLog；类职责表 |
-| 2026-07-29 | 投影=当前快照（旧词先说）；文首加「防新概念套概念」规矩 |
+| 2026-07-29 | 投影=当前快照；防新概念套概念 |
+| 2026-07-29 | 写法升级为四层（概念/维护/术语/类）；球权节按四层重写 |
