@@ -105,8 +105,8 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | hold 期间状态 / thread vs invocation 已钉 | 见 hold_ball 与基础概念两节 | 继续细问，或开调度 |
-| 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 调度 / 记忆 / … |
+| 1 | ③ 调度：总体 + 核心概念已写 | busy gate / 出队细则待展开 | 点名拆某一子题 |
+| 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 记忆 / Skills / SOP |
 
 （懂了就删行；整表最多 3 条。）
 
@@ -498,9 +498,207 @@ stateDiagram-v2
 
 **问题引出：** 路由已经决定「该叫醒谁」，但同一只猫可能正忙、多来源（用户、A2A、连接器、定时）会抢同一执行槽。若没有统一排队与分层 busy gate，就会插队、饿死或重复 invoke——调度回答「叫醒如何落地为有序执行」。
 
-**定锚：** 目标猫确定后，调用进入 `InvocationQueue`；用户消息、连接器唤醒、A2A 续传等来源的 busy gate / 优先级分层不同（F175 / F185）。
+**定锚：** 路由定「叫醒谁」；调度定「现在能不能跑、忙则排队、按什么顺序出队」——统一走 `InvocationQueue` + `InvocationTracker`，busy gate 按来源分层（F175 / F185）。
 
-*（尚无主题小节）* · [回总地图](#1-总地图)
+**章内跳转：** [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [回总地图](#1-总地图)
+
+<a id="dispatch-overview"></a>
+
+#### 调度总体
+
+**问题引出：** 同一条 thread 里，用户消息、A2A 续传、GitHub CI 通知、hold 定时唤醒可能同时到达；若「谁在跑」和「谁在等」各搞一套，会出现抢占 CLI、消息静默丢弃、或 connector 被猫链饿死。调度要在**不替代路由**的前提下，把「一次 invocation 如何落地执行」管起来。
+
+---
+
+**① 概念**  
+调度 = **执行平面**：路由已经给出 `targetCats` 之后，决定这次是**立刻起 CLI**，还是**先入队**，以及**按什么顺序出队**。  
+两个互补部件（代码注释原话）：
+
+| 部件 | 人话 | 术语 |
+|------|------|------|
+| `InvocationTracker` | **谁在跑**（占用执行槽 / 可 abort） | 互斥 / busy |
+| `InvocationQueue` | **谁在等**（排队条目） | QueueEntry |
+
+一条典型路径：
+
+```
+消息/唤醒到达（用户 / connector / A2A / hold 到期…）
+  → 路由：targetCats 已定
+  → 调度：thread/槽 是否 busy？
+       ├─ 空闲 → 直接 routeExecution → invocation running → CLI
+       └─ 忙   → InvocationQueue.enqueue → 等当前 invocation 完成
+                 → QueueProcessor.onInvocationComplete / tryAutoExecute
+                 → 按优先级出队 → 再起 CLI
+```
+
+和传球的关系：**② 传球**只决定进队前的目标猫；**③ 调度**决定何时、以何优先级真正执行。hold 到期唤醒也走 `invokeTrigger` → 同样进这套平面。
+
+**② 怎么维护（总体行为）**
+
+1. **入队**：来源标 `source`（`user` | `connector` | `agent`）+ 可选 `sourceCategory`（`ci` / `review` / `a2a` / `continuation`…）+ `priority`（`urgent` | `normal`）。  
+2. **判忙（分层，F185）**：用户主动发消息、外部 connector 事件、A2A 猫链**不能共用同一套「忙了就丢」规则**——例如 connector 在 thread 忙时应**排队**，而不是和猫抢槽乱并发。  
+3. **出队（F175）**：统一队列内排序，大致 `手动 position` → `priority` → `createdAt`；**取消**早年「urgent 直接抢占正在跑的 invocation」的 bypass。  
+4. **公平（F185）**：若队列里已有 **non-agent**（用户 / connector）在等，**暂缓**再启动新的 agent 链，避免 CI/外部消息被 A2A 饿死。  
+5. **完成回调**：一次 invocation 结束 → `onInvocationComplete` → `tryAutoExecute` 尝试拉下一条。
+
+**③ 技术命名**
+
+| 人话 | 术语 |
+|------|------|
+| 排队条目 | `QueueEntry`（`InvocationQueue`） |
+| 自动拉下一单 | `tryAutoExecute` / `onInvocationComplete`（`QueueProcessor`） |
+| 占槽 / 释放槽 | `InvocationTracker.start` / `startAll` / `complete` |
+| 外部自动化唤醒入口 | `ConnectorInvokeTrigger.trigger()` |
+| 用户发消息入口 | `messages.ts` → 路由 + 入队 |
+| hold 定时唤醒 | `reminder` → `invokeTrigger.trigger` → 同上 |
+
+**④ 类 / 模块**（`packages/api/src/domains/cats/services/agents/invocation/`）
+
+| 类 | 作用 |
+|----|------|
+| `InvocationQueue` | per-thread 排队、优先级、去重、公平查询 |
+| `QueueProcessor` | 出队、合并连续用户消息、驱动 `routeExecution` |
+| `InvocationTracker` | 运行中槽位、thread/cat 级 busy |
+| `InvocationRecordStore` | 单次 invocation 生命周期记账（与队列互补） |
+| `ConnectorInvokeTrigger` | connector/外部事件 → 判忙 → 执行或入队 |
+
+文档：`F175`（统一队列与优先级）· `F185` / ADR-034（busy gate 分层与公平）· cell `dispatch`。
+
+---
+
+<a id="dispatch-core-concepts"></a>
+
+#### 核心概念：ideate / execute / entry / invocation / 槽
+
+**问题引出：** 聊调度时容易把「排队票」「一趟执行」「并行 brainstorm」「占槽」混成一团。先把五个词钉死，后面 busy gate、出队细则才说得清。
+
+---
+
+**① 概念**
+
+| 词 | 人话 | 管哪一层 |
+|----|------|----------|
+| **ideate** | 多猫**各自独立思考**（头脑风暴） | 一次 invocation **内部**怎么协作 |
+| **execute** | 多猫**按任务链接力**（流水线 / A2A 链） | 同上 |
+| **entry** | 排队里的**一张工单**（thread 忙时先等着） | **调度 / 队列**层 |
+| **invocation** | **一趟真正跑起来**的执行周期（有 `invocationId`、状态机） | **执行记账**层 |
+| **槽（slot）** | 某 thread 里某只猫**此刻有没有占着 CLI 在跑** | **互斥 / 占槽**层 |
+
+**关系（自上而下）：**
+
+```
+用户消息 / connector / A2A / hold 唤醒
+        │
+        ▼
+   路由：targetCats + intent（ideate / execute）
+        │
+        ├─ thread 忙？ ──是──► InvocationQueue.enqueue → entry（排队）
+        │                              │
+        └─ 空闲 ───────────────────────┤
+                                       ▼
+                          出队 / 直接执行 → 创建 InvocationRecord（一次 invocation）
+                                       │
+                          start / startAll 占住各猫的槽（slot）
+                                       │
+                    ┌──────────────────┴──────────────────┐
+                    ▼                                      ▼
+            intent=ideate 且多猫                    intent=execute 或单猫
+            routeParallel                           routeSerial
+            多猫同时跑（多槽并行）                   多猫一只接一只（单槽轮流）
+```
+
+**层级对照：**
+
+| 层级 | 概念 | 数量关系 |
+|------|------|----------|
+| thread | 对话线 | 1 条 thread 里可有多条 entry 排队 |
+| entry | 排队票 | 多条 entry → 通常**依次**变成多次 invocation |
+| invocation | 一趟执行 | 1 次 invocation 可带**多只** `targetCats` |
+| slot | 猫占用的跑位 | 1 次 invocation 可占**多个** slot（并行时） |
+| intent | 协作模式 | 钉在 entry / invocation 上，决定 parallel 还是 serial |
+
+**② 怎么维护**
+
+- **ideate / execute 从哪来**：`IntentParser.parseIntent(message, targetCatCount)`——显式 `#ideate` / `#execute` 优先；否则 ≥2 猫 → `ideate`，1 猫 → `execute`。`#critique` 等是 **prompt tag**，只改思维方式，**不改**路由意图。  
+- **entry 何时产生**：`messages.ts` / `ConnectorInvokeTrigger` 等入口发现 thread 忙（`InvocationTracker.has(threadId)`）→ `InvocationQueue.enqueue`。  
+- **invocation 何时产生**：`QueueProcessor.executeEntry` 出队时 `invocationRecordStore.create(...)`；或直接执行路径在占槽后创建。  
+- **槽何时占/放**：执行前 `start`（单猫）或 `startAll`（多猫并行批次）；结束 `complete` / `completeAll`；同猫同 thread 新 invocation 可 **抢占（abort）** 旧槽。
+
+**③ 技术命名**
+
+| 人话 | 术语 |
+|------|------|
+| 路由意图 | `Intent` = `'ideate' \| 'execute'`（`IntentParser`） |
+| 路由策略 | `strategy` = `'parallel' \| 'serial'`（`AgentRouter`：`ideate && 多猫` → parallel） |
+| 排队条目 | `QueueEntry`（含 `intent`、`targetCats`、`source`、`priority`…） |
+| 执行记账 | `InvocationRecord`（`InvocationRecordStore`） |
+| 执行槽 | `ExecutionSlot(threadId, catId)`（F108，`InvocationTracker`） |
+
+**④ 类**
+
+`IntentParser.ts` · `AgentRouter.ts`（`routeParallel` / `routeSerial`）· `InvocationQueue.ts` · `QueueProcessor.ts` · `InvocationTracker.ts` · `InvocationRecordStore.ts`
+
+**易混点**
+
+- **entry ≠ invocation**：多条连续 user entry 可能被 batch **合并成一次** invocation；一次 invocation 结束后再拉**下一条** entry。  
+- **intent 钉在 entry/invocation 上**，不钉在 slot 上——槽只回答「这只猫此刻占不占 runner」。
+
+---
+
+<a id="dispatch-parallel-granularity"></a>
+
+#### 并行粒度：不是全局顺序独占
+
+**问题引出：** 「调度是不是一只猫跑完另一只才能跑？」——不是。猫咖是 **单猫独占槽 + 多猫可并行 + thread 级入队互斥** 三层叠在一起。
+
+---
+
+**① 概念**
+
+| 粒度 | 规则 | 人话 |
+|------|------|------|
+| **单猫 × 单 thread** | 独占 | 同一只猫在同 thread 同时只能跑一个 invocation；新来的可抢占旧的 |
+| **多猫 × 单 thread** | 可并行 | 不同猫占不同槽 `(threadId, catId)`，**可以同时跑**（F108） |
+| **单 thread 入队** | 大体顺序 | thread 里若已有猫在跑，新叫醒请求**先入队**；当前这波结束再出队 |
+
+**同 thread + 同 invocation 内能否多猫并行？**
+
+| 条件 | 结果 |
+|------|------|
+| `intent = ideate` 且 `targetCats.length > 1` | **能** — `startAll` 占多槽，`routeParallel` 同时起多个 CLI |
+| `intent = execute`，或只有 1 只猫 | **不能** — `routeSerial`，worklist 一只接一只 |
+| 用户写 `#execute @A @B` | 即使两只猫也**强制串行** |
+
+分叉（`AgentRouter`）：`strategy = ideate && 多猫 ? 'parallel' : 'serial'`。
+
+**② 怎么维护**
+
+- 并行批次：`QueueProcessor` → `invocationTracker.startAll(threadId, targetCats)` → `routeParallel`；各猫独立 `AbortController`，取消一只不误伤同批其它猫（F-parallel-cancel）。  
+- 串行链：`routeSerial` + worklist；A2A 目标通过 `trackExternalSlot` 保持 thread 级 busy，避免球还没传完就误拉下一单。  
+- thread 级门：非 force 路径 `tryStartThreadAll` — 若 `has(threadId)` 为真则降级入队，不硬插。  
+- 不同 **thread** 互不影响，可各自并行。
+
+**③ 技术命名**
+
+| 人话 | 术语 |
+|------|------|
+| 多槽并发能力 | F108 `ExecutionSlot(threadId, catId)` |
+| 并行路由 | `routeParallel` + `startAll` |
+| 串行路由 | `routeSerial` + worklist |
+| 非抢占占槽 | `tryStartThread` / `tryStartThreadAll` |
+| 抢占占槽 | `start` / `startAll`（同槽 abort 旧 invocation） |
+
+**④ 类**
+
+`InvocationTracker.ts`（文件头注释即 F108 语义）· `route-parallel.ts` · `route-serial.ts` · `AgentRouter.ts`
+
+**一句话：** entry 之间顺序；**同一次 ideate invocation 之内**可以多猫并行；execute / A2A 链则一只接一只。
+
+**待展开（点名再挖）**  
+- busy gate：thread 级 vs cat 级 vs 来源分层  
+- `QueueEntry` 各字段与出队排序细则  
+- 公平门（non-agent 防饿死）  
+- hold 唤醒在 busy 时的 `deferWhileThreadBusy`
 
 ---
 
@@ -549,7 +747,13 @@ stateDiagram-v2
 - [x] ② 传球：回退梯 → [回退梯](#pass-fallback)
 - [x] ② 传球：球权状态 → [球权状态](#pass-dropped)
 - [x] ② 传球：`hold_ball` → [hold_ball](#pass-hold)
-- [ ] ③ 调度：InvocationQueue / busy gate / 优先级
+- [x] ③ 调度：总体 → [调度总体](#dispatch-overview)
+- [x] ③ 调度：核心概念 → [核心概念](#dispatch-core-concepts)
+- [x] ③ 调度：并行粒度 → [并行粒度](#dispatch-parallel-granularity)
+- [ ] ③ 调度：busy gate 分层（thread / cat / 来源）
+- [ ] ③ 调度：出队优先级与 QueueEntry 字段
+- [ ] ③ 调度：公平门（non-agent 防饿死）
+- [ ] ③ 调度：hold 唤醒与 `deferWhileThreadBusy`
 - [ ] ① 身份：roster / 会话绑定
 - [ ] ④ 记忆：索引与检索路径
 - [ ] ⑤ Skills / MCP 一次调用链路
@@ -573,3 +777,4 @@ stateDiagram-v2
 | 2026-07-29 | 投影=当前快照；防新概念套概念 |
 | 2026-07-29 | 写法升级为四层；球权节按四层重写 |
 | 2026-07-29 | hold_ball：等待期状态表 + 是否调 CLI；补 thread vs invocation |
+| 2026-07-31 | ③ 调度：总体 + 核心概念（ideate/entry/execute/槽）+ 并行粒度 |
