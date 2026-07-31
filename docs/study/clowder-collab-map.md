@@ -760,6 +760,16 @@ stateDiagram-v2
 
 **和 F175 的关系：** 早年 urgent connector 走 bypass **抢占**正在跑的 invocation；F175 删掉 bypass，urgent 语义变为「**优先出队**」，不再 abort 活跃 CLI。
 
+**常见澄清（研讨中问过）**
+
+| 疑问 | 人话答案 |
+|------|----------|
+| **多 User 是什么？日常不是只有一个 co-creator 吗？** | 对，**典型单机部署只有一个真人**（co-creator，`userId` 固定）。队列在存储上仍按 `threadId:userId` 分桶，是为了**隔离权限与未来多用户**（F077 共享协作、F134 飞书群等多真人场景）。`AcrossUsers` API = 系统从**同一条 thread 的所有 user 桶**里挑下一张票；你现在只有一桶时，行为等价于「只扫你自己」。`position` 只在**同一 userId** 内比较，是为防共享 thread 里 A 用户拖动影响 B。 |
+| **continuation 是什么？** | **会话续传工单**：某猫一轮 invocation 因上下文封印（session seal / compact 边界等）需要**新开一轮**继续干时，平台自动 `enqueue` 一条 `source=agent` + `sourceCategory=continuation` 的 entry，带上 `CollaborationContinuityCapsule`（上一轮交接胶囊）。`autoExecute=true`，且被**系统钉死**在队首（`isSystemPinnedQueueEntry`），优先于普通 urgent。人话：**同一只猫的工作没做完，系统帮它排一张「续干」的票**。 |
+| **手动拖动在哪？是 status bar 吗？** | **不是** `ThreadExecutionBar`（输入框上方那条）——那条只显示**正在跑哪只猫**、停止/强重置。**排队拖动**在紧挨其下的 **`QueuePanel`（「排队中」面板）**：thread 忙时你的消息会进队，列表支持 **drag & drop** 改顺序 → `PATCH /api/threads/:threadId/queue/reorder` 写 `position`。也可删单条、撤回编辑、steer 提前。只有 `status=queued` 的可见 entry 能拖；`continuation` 系统钉死项不能拖。 |
+
+前台布局（`ChatContainer`）：`ThreadExecutionBar`（谁在跑）→ `QueuePanel`（谁在等、可拖动）→ 输入框。
+
 **待展开（点名再挖）**  
 - busy gate：thread 级 vs cat 级 vs 来源分层  
 - 公平门（non-agent 防饿死）细则  
@@ -844,3 +854,4 @@ stateDiagram-v2
 | 2026-07-29 | hold_ball：等待期状态表 + 是否调 CLI；补 thread vs invocation |
 | 2026-07-31 | ③ 调度：总体 + 核心概念（ideate/entry/execute/槽）+ 并行粒度 |
 | 2026-07-31 | ③ 调度：出队排序（compareEntries 四维 + batch + F175） |
+| 2026-07-31 | ③ 调度：澄清 multi-user / continuation / QueuePanel 拖动 |
