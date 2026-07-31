@@ -105,7 +105,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | ③ 调度：总体 + 核心概念 + 出队排序已写 | busy gate / 公平门待展开 | 点名拆某一子题 |
+| 1 | ③ 调度：总体 + 出队 + 公平门已写 | busy gate 待展开 | 点名拆某一子题 |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 记忆 / Skills / SOP |
 
 （懂了就删行；整表最多 3 条。）
@@ -500,7 +500,7 @@ stateDiagram-v2
 
 **定锚：** 路由定「叫醒谁」；调度定「现在能不能跑、忙则排队、按什么顺序出队」——统一走 `InvocationQueue` + `InvocationTracker`，busy gate 按来源分层（F175 / F185）。
 
-**章内跳转：** [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [回总地图](#1-总地图)
+**章内跳转：** [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [公平门](#dispatch-fair-gate) · [回总地图](#1-总地图)
 
 <a id="dispatch-overview"></a>
 
@@ -770,6 +770,74 @@ stateDiagram-v2
 
 前台布局（`ChatContainer`）：`ThreadExecutionBar`（谁在跑）→ `QueuePanel`（谁在等、可拖动）→ 输入框。
 
+---
+
+<a id="dispatch-fair-gate"></a>
+
+#### 公平门（non-agent 防饿死）
+
+**问题引出：** 猫链（A2A）可以一轮接一轮自动扩展 worklist；若队列里已经排着**你的消息**或 **CI/review 等 connector 通知**，猫链仍继续 `@下一只猫`，外部消息会**永远排不上**——F185 现场案例：opus 在 A2A round 2，CI failure 已入队，猫链仍扩展 → connector 饿死。
+
+**定锚：** **公平门 = 队列里只要有「真人/外部」在等（non-agent），就暂缓继续扩猫链或自动拉新的 agent entry**；non-agent 先出队跑完，再 `tryAutoExecute` 拉起 deferred A2A。
+
+---
+
+**① 概念**
+
+| 词 | 包含 | 不算 |
+|----|------|------|
+| **non-agent** | `source=user`（你发的）· `source=connector`（CI/review/定时等） | — |
+| **agent** | `source=agent`（A2A 传球、deferred handoff 等） | `sourceCategory=continuation` 是**续传**，走系统钉死队首，不走公平门挡别人 |
+
+人话：**你或外部系统的事，优先于猫自动接力扩链。**
+
+**两条 enforcement 路径（F185 Phase A + B）：**
+
+```
+路径 1 — tryAutoExecute 入口（Phase A）
+  队列有 non-agent 在等？
+    → hasDispatchableNonAgentQueued(threadId) === true
+    → tryAutoExecute 直接 return，不启动新的 autoExecute agent entry
+
+路径 2 — routeSerial text-scan（Phase B）
+  猫输出里扫到 @下一只猫，本来要立刻扩 worklist
+    → hasQueuedNonAgentForThread(threadId) === true
+    → 不 inline 扩展；改为 defer_queue：把 A2A 目标入队排在 non-agent 后面
+    → non-agent 跑完后 onInvocationComplete → tryAutoExecute 再拉起 deferred A2A
+```
+
+**和出队排序的关系：** 公平门管的是「**能不能继续产/拉 agent 活**」；`compareEntries` 管的是「多张票里谁先出」。两者叠加：non-agent 通常已按 urgent/createdAt 排在前面，公平门再保证猫链不会在它们前面偷偷开新坑。
+
+**② 怎么维护**
+
+1. **检测 API**：`InvocationQueue.hasQueuedNonAgentForThread(threadId)` — 该 thread 任意 user 桶里是否存在 `status=queued` 且 `source !== 'agent'` 的 entry。  
+2. **tryAutoExecute 门**：`QueueProcessor.hasDispatchableNonAgentQueued` — 在 (1) 基础上再排除「目标猫槽处于 paused」的 non-agent（暂停槽上的排队不算可调度阻塞）。  
+3. **A2A text-scan 门**：`route-serial` 里 `queueHasQueuedMessages` 回调实际接 `hasQueuedNonAgentForThread`（**含 connector**，不再只看 user）。  
+4. **defer 而非丢弃**：gate 命中时 `resolveRoutingDecisions` → `defer_queue` → 入队 `source=agent, sourceCategory=a2a, autoExecute=true`，携带 `callerCatId` + 完整 `content`（猫 A 输出）供猫 B 续干。  
+5. **例外 / 绕过**：`tryAutoExecute(..., { bypassNonAgentGate: true })` 仅用于 continuation 恢复等窄场景；`continuation` 系统钉死项不受 AC-8「agent 禁 urgent」约束；`relay_malformed` 恢复路径不走 fairness 链。
+
+**③ 技术命名**
+
+| 人话 | 术语 |
+|------|------|
+| 公平不变式 | F185 AC-6/7 · ADR-034 OQ-3 fairness invariant |
+| 有外部在等？ | `hasQueuedNonAgentForThread` |
+| 可调度地挡 agent？ | `hasDispatchableNonAgentQueued` |
+| A2A 延后入队 | `defer_queue` / deferred enqueue（F185 Phase B） |
+| agent 不能 urgent 插队 | enqueue 校验：agent 且非 continuation → 强制 `normal` |
+
+**④ 类**
+
+`InvocationQueue.ts` · `QueueProcessor.ts`（`tryAutoExecute` 早退）· `route-serial.ts`（text-scan gate）· `routing-decision.ts`（`defer_queue` 决策）· `docs/features/F185-dispatch-busy-gate-unification.md`
+
+**场景对照**
+
+| 场景 | 无公平门 | 有公平门 |
+|------|----------|----------|
+| 猫 A 跑着，CI 通知入队，猫 A 输出 `@猫B` | worklist 立刻扩到猫 B，CI 继续等 | A2A **入队延后**，CI **先出队** |
+| 队列只有 agent 互 @ | 正常扩链 / autoExecute | **不挡**（agent 不挡 agent） |
+| 猫 session 需 continuation 续传 | — | **钉死队首**，不受公平门压制 |
+
 **待展开（点名再挖）**  
 - busy gate：thread 级 vs cat 级 vs 来源分层  
 - 公平门（non-agent 防饿死）细则  
@@ -826,8 +894,8 @@ stateDiagram-v2
 - [x] ③ 调度：核心概念 → [核心概念](#dispatch-core-concepts)
 - [x] ③ 调度：并行粒度 → [并行粒度](#dispatch-parallel-granularity)
 - [x] ③ 调度：出队排序与 QueueEntry → [出队排序](#dispatch-dequeue-ordering)
+- [x] ③ 调度：公平门 → [公平门](#dispatch-fair-gate)
 - [ ] ③ 调度：busy gate 分层（thread / cat / 来源）
-- [ ] ③ 调度：公平门（non-agent 防饿死）
 - [ ] ③ 调度：hold 唤醒与 `deferWhileThreadBusy`
 - [ ] ① 身份：roster / 会话绑定
 - [ ] ④ 记忆：索引与检索路径
@@ -855,3 +923,4 @@ stateDiagram-v2
 | 2026-07-31 | ③ 调度：总体 + 核心概念（ideate/entry/execute/槽）+ 并行粒度 |
 | 2026-07-31 | ③ 调度：出队排序（compareEntries 四维 + batch + F175） |
 | 2026-07-31 | ③ 调度：澄清 multi-user / continuation / QueuePanel 拖动 |
+| 2026-07-31 | ③ 调度：公平门（tryAutoExecute + text-scan defer_queue） |
