@@ -105,7 +105,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | ③ 调度：总体 + 核心概念已写 | busy gate / 出队细则待展开 | 点名拆某一子题 |
+| 1 | ③ 调度：总体 + 核心概念 + 出队排序已写 | busy gate / 公平门待展开 | 点名拆某一子题 |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 记忆 / Skills / SOP |
 
 （懂了就删行；整表最多 3 条。）
@@ -500,7 +500,7 @@ stateDiagram-v2
 
 **定锚：** 路由定「叫醒谁」；调度定「现在能不能跑、忙则排队、按什么顺序出队」——统一走 `InvocationQueue` + `InvocationTracker`，busy gate 按来源分层（F175 / F185）。
 
-**章内跳转：** [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [回总地图](#1-总地图)
+**章内跳转：** [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [回总地图](#1-总地图)
 
 <a id="dispatch-overview"></a>
 
@@ -694,10 +694,75 @@ stateDiagram-v2
 
 **一句话：** entry 之间顺序；**同一次 ideate invocation 之内**可以多猫并行；execute / A2A 链则一只接一只。
 
+---
+
+<a id="dispatch-dequeue-ordering"></a>
+
+#### 出队排序与 QueueEntry
+
+**问题引出：** 队列不是纯 FIFO——F175 之后 urgent 不再抢占正在跑的 invocation，而是靠**队内排序**决定谁先出队；用户还能拖动改顺序。若不钉清比较器规则，会误以为「先 enqueue 的一定先跑」或「CI urgent 会踢掉正在跑的猫」。
+
+---
+
+**① 概念**
+
+出队 = 从所有 `status === 'queued'` 的 entry 里，用 **`compareEntries` 多维比较器** 选出「当前该跑的那张票」，再 `markProcessing` 标成 `processing`。
+
+**排序优先级（高 → 低）：**
+
+| 顺位 | 条件 | 人话 |
+|------|------|------|
+| 0 | **系统钉死** | `source=agent` 且 `sourceCategory=continuation` 的续传 entry **永远最前**（`isSystemPinnedQueueEntry`） |
+| 1 | **手动 position** | 仅**同一 userId** 内比较：有 `position` 的排在没 position 前面；都有则 `position` 数值小的在前（拖动排序） |
+| 2 | **priority** | `urgent`（0）> `normal`（1） |
+| 3 | **createdAt** | 越早创建越先出（FIFO 兜底） |
+
+**不参与排序的字段：** `sourceCategory`（`ci` / `review` / `a2a`…）只用于 UI 分组与诊断，**不改变**出队顺序。
+
+**存储 vs 排序：** entry 按 `threadId:userId` 存在内存数组里（enqueue 时 `push`），但出队前会 **`sort(compareEntries)`**，所以物理插入顺序≠出队顺序。
+
+**② 怎么维护（出队路径）**
+
+1. **系统级拉下一单**（invocation 成功后）：`onInvocationComplete` → `tryExecuteNextAcrossUsers` → `markProcessingAcrossUsers(threadId, skipCatIds)`——**跨所有 user** 扫一遍，按比较器取最优；若目标猫槽仍忙则 `rollbackProcessing` 并跳过该猫继续扫。  
+2. **用户手动拉下一单**：`processNext` → `peekNextQueued`（同 user 内排序预览）→ 槽空闲 → `markProcessing`。  
+3. **A2A 自动拉**（`autoExecute` entry）：`tryAutoExecute` 单独扫 agent 条目，按 `createdAt`（**不走**完整比较器）；且若队列里有 **non-agent**（user/connector）在等，默认**暂缓** agent 链（公平门，F185）。  
+4. **用户消息 batch**：出队后若 `source === 'user'`，`collectUserBatch` 在**已排序**的 queued 列表里，收集紧随其后的连续 user entry（同 `intent`、同 `targetCats` 集合）→ **合并成一次 invocation 的 content**；connector/agent **始终单条**处理。拖动改 `position` 可打断 batch 边界。  
+5. **入队时 priority 归一**：普通 `agent` entry（非 continuation）**强制** `normal`，防止 A2A 链靠 urgent 插队；continuation 可被系统钉死到最前。  
+6. **容量**：仅 **user** 来源限深 `MAX_QUEUE_DEPTH = 5`；connector/agent 无硬上限（靠其它 guard）。
+
+**③ 技术命名**
+
+| 人话 | 术语 / API |
+|------|------------|
+| 比较器 | `InvocationQueue.compareEntries` |
+| 跨用户取最优 | `peekOldestAcrossUsers` / `markProcessingAcrossUsers` |
+| 单用户取最优 | `peekNextQueued` / `markProcessing` |
+| 用户拖动 | `setPosition` / `move` / `promote` |
+| 合并连续用户消息 | `collectUserBatch` |
+| 公平门 | `hasQueuedNonAgentForThread` + `tryAutoExecute` 入口检查 |
+| 系统钉死续传 | `isSystemPinnedQueueEntry` |
+
+**QueueEntry 与排序相关字段：**
+
+| 字段 | 作用 |
+|------|------|
+| `priority` | `urgent` \| `normal` |
+| `position` | 用户手动排序（可选；同 user 内优先于 priority） |
+| `source` | `user` \| `connector` \| `agent`（影响 batch、容量、公平门） |
+| `sourceCategory` | 分组标签，**不参与**比较器 |
+| `continuationKey` | agent 续传去重 |
+| `createdAt` | 最终 FIFO  tiebreaker |
+| `status` | `queued` → `processing`（出队时改） |
+
+**④ 类**
+
+`InvocationQueue.ts`（`compareEntries`、出队 API）· `QueueProcessor.ts`（`tryExecuteNextAcrossUsers`、`collectUserBatch` 消费侧）· `docs/features/F175-unified-message-queue.md`
+
+**和 F175 的关系：** 早年 urgent connector 走 bypass **抢占**正在跑的 invocation；F175 删掉 bypass，urgent 语义变为「**优先出队**」，不再 abort 活跃 CLI。
+
 **待展开（点名再挖）**  
 - busy gate：thread 级 vs cat 级 vs 来源分层  
-- `QueueEntry` 各字段与出队排序细则  
-- 公平门（non-agent 防饿死）  
+- 公平门（non-agent 防饿死）细则  
 - hold 唤醒在 busy 时的 `deferWhileThreadBusy`
 
 ---
@@ -750,8 +815,8 @@ stateDiagram-v2
 - [x] ③ 调度：总体 → [调度总体](#dispatch-overview)
 - [x] ③ 调度：核心概念 → [核心概念](#dispatch-core-concepts)
 - [x] ③ 调度：并行粒度 → [并行粒度](#dispatch-parallel-granularity)
+- [x] ③ 调度：出队排序与 QueueEntry → [出队排序](#dispatch-dequeue-ordering)
 - [ ] ③ 调度：busy gate 分层（thread / cat / 来源）
-- [ ] ③ 调度：出队优先级与 QueueEntry 字段
 - [ ] ③ 调度：公平门（non-agent 防饿死）
 - [ ] ③ 调度：hold 唤醒与 `deferWhileThreadBusy`
 - [ ] ① 身份：roster / 会话绑定
@@ -778,3 +843,4 @@ stateDiagram-v2
 | 2026-07-29 | 写法升级为四层；球权节按四层重写 |
 | 2026-07-29 | hold_ball：等待期状态表 + 是否调 CLI；补 thread vs invocation |
 | 2026-07-31 | ③ 调度：总体 + 核心概念（ideate/entry/execute/槽）+ 并行粒度 |
+| 2026-07-31 | ③ 调度：出队排序（compareEntries 四维 + batch + F175） |
