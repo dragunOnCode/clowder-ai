@@ -105,7 +105,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | ③ 调度主干已齐（见 [毕业清单](#dispatch-graduation)） | hold defer / 失败恢复为可选 | 转 ①身份 / ④记忆，或点名边角 |
+| 1 | ③ 调度已齐（含 [可靠性](#dispatch-reliability)） | hold defer 为可选 | 转 ④记忆 / ①身份，或② hold 衔接 |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 记忆 / Skills / SOP |
 
 （懂了就删行；整表最多 3 条。）
@@ -500,7 +500,7 @@ stateDiagram-v2
 
 **定锚：** 路由定「叫醒谁」；调度定「现在能不能跑、忙则排队、按什么顺序出队」——统一走 `InvocationQueue` + `InvocationTracker`，busy gate 按来源分层（F175 / F185）。
 
-**章内跳转：** [术语表](#dispatch-glossary) · [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [busy gate](#dispatch-busy-gate) · [公平门](#dispatch-fair-gate) · [总图](#dispatch-flow-overview) · [时间线](#dispatch-timeline) · [毕业清单](#dispatch-graduation) · [回总地图](#1-总地图)
+**章内跳转：** [术语表](#dispatch-glossary) · [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [busy gate](#dispatch-busy-gate) · [公平门](#dispatch-fair-gate) · [总图](#dispatch-flow-overview) · [时间线](#dispatch-timeline) · [可靠性](#dispatch-reliability) · [毕业清单](#dispatch-graduation) · [回总地图](#1-总地图)
 
 <a id="dispatch-glossary"></a>
 
@@ -1041,19 +1041,108 @@ T0 到达 ──► 【Busy gate】入队 or 立刻跑
 
 ---
 
+<a id="dispatch-reliability"></a>
+
+#### 可靠性：失败 pause / force / cancelAll
+
+**问题引出：** invocation 会失败、被用户打断、或 thread 卡死。若结束态处理不当，会出现：队列永远不再拉下一单、force 发消息后旧清理又把槽 pause 住、或 cancelAll 后队列偷偷自动续跑。
+
+**定锚：** `onInvocationComplete(status)` 是**结束态总闸**；`pausedSlots` + `suppressedAutoResume` 管「要不要自动拉队列」；用户动作用 `cancel` / `cancelInvocation` / `cancelAll` / `force-reset` 分层。
+
+---
+
+**① 概念**
+
+| 结束态 / 用户动作 | 人话 | 队列会怎样 |
+|-------------------|------|------------|
+| **succeeded** | 正常跑完 | 清 pause → **自动** `tryExecuteNextAcrossUsers` + `tryAutoExecute` |
+| **failed** | CLI/路由报错 | 若队列里还有 entry → **pause 该槽** ~10s → 通知 `queue_paused` → 超时后**自动恢复**拉下一单 |
+| **canceled** | 非用户意图的取消（抢占等） | 同 failed（pause + 自动恢复） |
+| **canceled_by_user** | 用户点停止 | 清 pause → **通常自动拉下一单**（除非 cancel_all 抑制） |
+| **单猫停止** | `cancel(thread, catId)` | 只停这一只；**不**抑制 auto-resume |
+| **cancelAll / 全部停止** | `cancelAll(..., 'cancel_all')` | 停 thread 内所有槽；**抑制** auto-resume（队列保留但不自动开） |
+| **force 发消息** | `deliveryMode=force` | **抢占**目标猫 invocation（`cancelInvocation` 范围限定），`clearPause` 防旧清理误 pause |
+| **force-reset** | 卡死逃生舱 | `cancelAll` + 清 processingSlots + 标 running record canceled；**不删队列** |
+
+**pause 是什么？** 不是删队列，而是 `pausedSlots` 标记 + 前台 `QueuePanel` 显示「队列已暂停」（失败/取消原因）。`processNext`（用户点继续）或 **10s 自动恢复**（#595）会清 pause 再拉下一单。
+
+**cancelAll vs 单猫 cancel vs force：**
+
+```
+单猫 cancel     → 只 abort 该猫槽；并行跑的 whisper 猫不受影响
+cancelInvocation → force 用：只 preempt 目标猫及其同 batch 兄弟
+cancelAll       → 整 thread 所有活跃 invocation 全停；suppressAutoResume
+```
+
+---
+
+**② 怎么维护（`onInvocationComplete` 分支）**
+
+```
+succeeded | canceled_by_user:
+  → 清 pausedSlots
+  → 若 suppressAutoResume（仅 cancel_all 设置，且仅 consumed 于 canceled_by_user）→ return，不拉队列
+  → 否则 hasDispatchableQueued? → tryExecuteNextAcrossUsers + tryAutoExecute
+
+failed | canceled（非 user）:
+  → 若有 continuation 排队 → 优先 tryAutoExecute(onlyContinuation, bypassNonAgentGate)
+  → 否则若队列非空 → pause + emit queue_paused + 10s setTimeout 自动 tryExecuteNextAcrossUsers
+  → 队列已空 → 仅清 pause
+```
+
+**force 发消息特殊处理（`messages.ts`）：** 抢占后 **`clearPause(targetCats)`**，因为旧 invocation 异步 cleanup 会带着 `failed/canceled` 回来误 pause 新 invocation 的槽。
+
+**steer immediate（QueuePanel 提前执行）：** 可 `cancel` 目标猫当前运行；若无 tracker 槽但 processing 中 → **tombstone** 在途 entry，等其 self-abort 后再跑 steered entry（不 force-release 槽，防双启）。
+
+**force-reset 端点：** 必须用 abort reason `'cancel_all'`（不是自定义字符串），否则落入 `canceled` 分支 → pause + 10s 后又自动拉队列，与「解放 thread」意图相反。
+
+---
+
+**③ 技术命名**
+
+| 人话 | 术语 / API |
+|------|------------|
+| 结束回调 | `QueueProcessor.onInvocationComplete` |
+| 暂停槽 | `pausedSlots` · `isPaused` · `queue_paused` WS 事件 |
+| 自动恢复延迟 | `PAUSE_RECOVERY_DELAY_MS` = 10s（#595） |
+| 禁止自动拉队列 | `suppressAutoResume` / `SUPPRESS_TTL_MS` = 60s |
+| 清 pause | `clearPause` |
+| 释放入队互斥 | `releaseSlot` / `releaseThread` |
+| 整 thread 停 | `InvocationTracker.cancelAll` |
+| 范围抢占 | `InvocationTracker.cancelInvocation`（force） |
+| 逃生重置 | `POST .../force-reset` |
+| 手动继续 | `processNext` / QueuePanel 继续按钮 |
+
+**④ 类 / 前台**
+
+`QueueProcessor.ts` · `InvocationTracker.ts` · `routes/queue.ts`（steer / force-reset）· `messages.ts`（force 路径）· `ThreadExecutionBar.tsx`（停止单猫 / 全部停止 / ForceResetDialog）
+
+**场景对照**
+
+| 你做了什么 | 队列里的 entry | 会不会自动跑下一条 |
+|------------|----------------|-------------------|
+| 猫正常跑完 | 保留 | **会** |
+| 猫跑挂了（failed） | 保留 | **10s 后自动会**（或你手动继续） |
+| 点停一只猫 | 保留 | **会**（单猫 cancel 不 suppress） |
+| 全部停止 / force-reset | **保留** | **不会**（suppressAutoResume，需你再发或点继续） |
+| force 发新消息 | 保留 | 新消息立刻跑；旧清理不 pause 新槽 |
+
+**与公平门：** pause 期间，`hasDispatchableNonAgentQueued` 对**目标猫槽已 pause** 的 non-agent **不算阻塞**——避免失败 pause 永远挡住 agent 续传；continuation 有专门 bypass 路径。
+
+---
+
 <a id="dispatch-graduation"></a>
 
 #### 调度章：还需了解什么？
 
-**已覆盖（可视为调度主干毕业）：** 术语表 · 总体 · 五概念 · 并行粒度 · 出队排序 · busy gate · 公平门 · 总图 · 时间线。
+**已覆盖（可视为调度主干毕业）：** 术语表 · 总体 · 五概念 · 并行粒度 · 出队排序 · busy gate · 公平门 · 总图 · 时间线 · [可靠性](#dispatch-reliability)。
 
 **可选深挖（点名再挖）：**
 
 | 主题 | 人话 | 优先级 |
 |------|------|--------|
 | **hold + `deferWhileThreadBusy`** | hold 到期唤醒时 thread 仍忙，定时任务推迟 fire | 与②传球衔接时再看 |
-| **失败 pause / force / cancelAll** | 失败约 10s 自动恢复；强停语义 | 运维边角，知道有即可 |
-| **processingSlots gap** | invocation 交接窗口的忙判断补洞 | 排障用 |
+| **processingSlots gap / zombie sweep** | invocation 交接窗口、75min 槽 TTL | 排障用 |
 
 **调度章可「毕业」转其它脉：** ① 身份 · ④ 记忆 · ⑤ Skills/MCP · ⑥ SOP。日常协作理解不必再挖调度边角。
 
@@ -1113,6 +1202,7 @@ T0 到达 ──► 【Busy gate】入队 or 立刻跑
 - [x] ③ 调度：busy gate → [busy gate](#dispatch-busy-gate)
 - [x] ③ 调度：总图 → [总图](#dispatch-flow-overview)
 - [x] ③ 调度：时间线 → [时间线](#dispatch-timeline)
+- [x] ③ 调度：可靠性（pause / force / cancelAll）→ [可靠性](#dispatch-reliability)
 - [ ] ③ 调度：hold 唤醒与 `deferWhileThreadBusy`（可选）
 - [ ] ① 身份：roster / 会话绑定
 - [ ] ④ 记忆：索引与检索路径
@@ -1142,3 +1232,4 @@ T0 到达 ──► 【Busy gate】入队 or 立刻跑
 | 2026-07-31 | ③ 调度：澄清 multi-user / continuation / QueuePanel 拖动 |
 | 2026-07-31 | ③ 调度：公平门（tryAutoExecute + text-scan defer_queue） |
 | 2026-08-03 | ③ 调度：术语表、busy gate、总图、时间线、毕业清单 |
+| 2026-08-03 | ③ 调度：可靠性（pause / force / cancelAll / force-reset） |
