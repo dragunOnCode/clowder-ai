@@ -105,7 +105,7 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | ③ 调度：总体 + 出队 + 公平门已写 | busy gate 待展开 | 点名拆某一子题 |
+| 1 | ③ 调度主干已齐（见 [毕业清单](#dispatch-graduation)） | hold defer / 失败恢复为可选 | 转 ①身份 / ④记忆，或点名边角 |
 | 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 记忆 / Skills / SOP |
 
 （懂了就删行；整表最多 3 条。）
@@ -500,7 +500,29 @@ stateDiagram-v2
 
 **定锚：** 路由定「叫醒谁」；调度定「现在能不能跑、忙则排队、按什么顺序出队」——统一走 `InvocationQueue` + `InvocationTracker`，busy gate 按来源分层（F175 / F185）。
 
-**章内跳转：** [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [公平门](#dispatch-fair-gate) · [回总地图](#1-总地图)
+**章内跳转：** [术语表](#dispatch-glossary) · [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [busy gate](#dispatch-busy-gate) · [公平门](#dispatch-fair-gate) · [总图](#dispatch-flow-overview) · [时间线](#dispatch-timeline) · [回总地图](#1-总地图)
+
+<a id="dispatch-glossary"></a>
+
+#### 调度术语表（研讨口语 → 项目词）
+
+| 口语 / 疑问 | 正式名 | 人话 |
+|-------------|--------|------|
+| **排队条目**（口语偶称「票」） | `QueueEntry` | thread 忙时的一条**排队工单**；出队后变成一次 `invocation` |
+| **一次执行** | `Invocation` / `InvocationRecord` | 从占槽跑 CLI 到 `succeeded/failed` 的一趟周期 |
+| **槽** | `ExecutionSlot(threadId, catId)` | 某 thread 里某猫是否正占着 CLI |
+| **non-agent** | `source=user` 或 `connector` | 你发的消息，或 CI/review/定时等外部推送 |
+| **agent** | `source=agent` | 猫链产生的排队条目（A2A defer 等） |
+| **continuation** | `sourceCategory=continuation` | 同猫 session 续传；系统钉死队首，不是用户消息 |
+| **Whisper / 悄悄话** | `visibility='whisper'` + `whisperTo` | 只对指定猫可见；busy gate 用**猫槽级**（side-dispatch） |
+| **公平门** | fairness gate（F185） | non-agent 在等时，挡 agent inline 扩链 / autoExecute |
+| **Busy gate** | 入口判忙（F185 / ADR-034） | 新请求进门：立刻跑 vs `enqueue` |
+| **ThreadExecutionBar** | 前台组件 | 显示**正在跑**哪只猫；**不能**改排队顺序 |
+| **QueuePanel** | 前台组件 | 显示**排队中**条目；可拖动设 `position` |
+
+**Whisper 补充（F108）：** 输入框 🔒 → 选目标猫 → 发送。其它猫默认看不到内容。目标猫槽空闲时可**立刻叫醒**（别的猫在跑也不挡），用于「一边让猫 A 修 bug，一边私下问猫 B」。
+
+---
 
 <a id="dispatch-overview"></a>
 
@@ -764,8 +786,8 @@ stateDiagram-v2
 
 | 疑问 | 人话答案 |
 |------|----------|
-| **多 User 是什么？日常不是只有一个 co-creator 吗？** | 对，**典型单机部署只有一个真人**（co-creator，`userId` 固定）。队列在存储上仍按 `threadId:userId` 分桶，是为了**隔离权限与未来多用户**（F077 共享协作、F134 飞书群等多真人场景）。`AcrossUsers` API = 系统从**同一条 thread 的所有 user 桶**里挑下一张票；你现在只有一桶时，行为等价于「只扫你自己」。`position` 只在**同一 userId** 内比较，是为防共享 thread 里 A 用户拖动影响 B。 |
-| **continuation 是什么？** | **会话续传工单**：某猫一轮 invocation 因上下文封印（session seal / compact 边界等）需要**新开一轮**继续干时，平台自动 `enqueue` 一条 `source=agent` + `sourceCategory=continuation` 的 entry，带上 `CollaborationContinuityCapsule`（上一轮交接胶囊）。`autoExecute=true`，且被**系统钉死**在队首（`isSystemPinnedQueueEntry`），优先于普通 urgent。人话：**同一只猫的工作没做完，系统帮它排一张「续干」的票**。 |
+| **多 User 是什么？日常不是只有一个 co-creator 吗？** | 对，**典型单机部署只有一个真人**（co-creator，`userId` 固定）。队列在存储上仍按 `threadId:userId` 分桶，是为了**隔离权限与未来多用户**（F077 共享协作、F134 飞书群等多真人场景）。`AcrossUsers` API = 系统从**同一条 thread 的所有 user 桶**里挑下一条 QueueEntry；你现在只有一桶时，行为等价于「只扫你自己」。`position` 只在**同一 userId** 内比较，是为防共享 thread 里 A 用户拖动影响 B。 |
+| **continuation 是什么？** | **会话续传排队条目**：某猫一轮 invocation 因上下文封印（session seal / compact 边界等）需要**新开一轮**继续干时，平台自动 `enqueue` 一条 `source=agent` + `sourceCategory=continuation` 的 QueueEntry，带上 `CollaborationContinuityCapsule`（上一轮交接胶囊）。`autoExecute=true`，且被**系统钉死**在队首（`isSystemPinnedQueueEntry`），优先于普通 urgent。 |
 | **手动拖动在哪？是 status bar 吗？** | **不是** `ThreadExecutionBar`（输入框上方那条）——那条只显示**正在跑哪只猫**、停止/强重置。**排队拖动**在紧挨其下的 **`QueuePanel`（「排队中」面板）**：thread 忙时你的消息会进队，列表支持 **drag & drop** 改顺序 → `PATCH /api/threads/:threadId/queue/reorder` 写 `position`。也可删单条、撤回编辑、steer 提前。只有 `status=queued` 的可见 entry 能拖；`continuation` 系统钉死项不能拖。 |
 
 前台布局（`ChatContainer`）：`ThreadExecutionBar`（谁在跑）→ `QueuePanel`（谁在等、可拖动）→ 输入框。
@@ -806,7 +828,9 @@ stateDiagram-v2
     → non-agent 跑完后 onInvocationComplete → tryAutoExecute 再拉起 deferred A2A
 ```
 
-**和出队排序的关系：** 公平门管的是「**能不能继续产/拉 agent 活**」；`compareEntries` 管的是「多张票里谁先出」。两者叠加：non-agent 通常已按 urgent/createdAt 排在前面，公平门再保证猫链不会在它们前面偷偷开新坑。
+**和出队排序的关系：** 公平门管的是「**能不能继续产/拉 agent 活**」；`compareEntries` 管的是「多条 QueueEntry 里谁先出」。两者叠加：non-agent 通常已按 urgent/createdAt 排在前面，公平门再保证猫链不会在它们前面偷偷开新坑（inline worklist）。
+
+**defer 不是事后回忆：** 公平门命中时**当场** `deferA2AEnqueue` → `queue.enqueue()`，上下文写在 QueueEntry.`content` 里；non-agent 跑完后 `onInvocationComplete` → `tryAutoExecute` 拉起。
 
 **② 怎么维护**
 
@@ -838,10 +862,200 @@ stateDiagram-v2
 | 队列只有 agent 互 @ | 正常扩链 / autoExecute | **不挡**（agent 不挡 agent） |
 | 猫 session 需 continuation 续传 | — | **钉死队首**，不受公平门压制 |
 
-**待展开（点名再挖）**  
-- busy gate：thread 级 vs cat 级 vs 来源分层  
-- 公平门（non-agent 防饿死）细则  
-- hold 唤醒在 busy 时的 `deferWhileThreadBusy`
+---
+
+<a id="dispatch-busy-gate"></a>
+
+#### Busy gate（入口判忙）
+
+**问题引出：** 早年 connector 用 cat 级 `has(thread, catId)` 判忙——thread 里另一只猫在跑时，CI 通知可能被静默丢掉或乱并发。F185 改为**按来源分层**：用户 @ 可 side-dispatch 到空闲猫；connector **必须 thread 级**排队。
+
+**定锚：** **Busy gate = 新叫醒请求进门时：thread/猫槽忙不忙 → 立刻 `tryStart` 占槽跑，还是 `enqueue` 成 QueueEntry。**
+
+---
+
+**① 概念**
+
+| 粒度 | 人话 | 典型 API |
+|------|------|----------|
+| **Thread 级** | 这条 thread 里**有没有任何猫在跑**（或 processingSlots） | `has(threadId)` · `isThreadBusy` |
+| **Cat 级（槽）** | **某一只猫**占不占槽 | `has(threadId, catId)` · `isCatBusy` |
+
+**按来源分层（`messages.ts` / `ConnectorInvokeTrigger`）：**
+
+| 来源 | 判忙规则 | 忙则 |
+|------|----------|------|
+| **user 无 @** | thread 级 | 入队 |
+| **user @ 猫** | 任一**目标猫**槽忙 | 入队 |
+| **user whisper** | 仅**悄悄话目标猫**槽忙 | 入队；目标空闲可 side-dispatch |
+| **connector** | **thread 级** `isThreadBusy` → `tryStartThread` | 入队（不丢） |
+| **force** | 抢占目标猫槽 | 立刻跑（例外） |
+
+**② 怎么维护**
+
+```
+connector / 外部唤醒：
+  isThreadBusy? → enqueue
+  else tryStartThread → null? enqueue : executeInBackground
+
+用户消息（非 force）：
+  hasActive（按 whisper/@/thread 分层）
+  → 忙：enqueue
+  → 闲：tryStartThreadAll 占槽 → routeExecution
+  → TOCTOU 失败：降级 enqueue
+
+占槽语义：
+  tryStartThread(All) — 非抢占，thread 必须全空
+  start(All) — 抢占（force），可 abort 旧 invocation
+```
+
+**③ 技术命名**
+
+`InvocationTracker.has` · `tryStartThread` / `tryStartThreadAll` · `QueueProcessor.isThreadBusy` · `hasActiveExecution` · `ConnectorInvokeTrigger.trigger` · `docs/features/F185-dispatch-busy-gate-unification.md`
+
+**④ 类**
+
+`messages.ts` · `ConnectorInvokeTrigger.ts` · `InvocationTracker.ts` · `QueueProcessor.ts`
+
+**与公平门分工：** Busy gate 管**进门**；公平门管**执行期** agent 是否绕队 inline 扩链。
+
+---
+
+<a id="dispatch-flow-overview"></a>
+
+#### 总图：三条机制如何配合
+
+**问题引出：** busy gate、出队排序、公平门都管「谁先跑」，但层次不同——用一张总图串起来。
+
+```mermaid
+flowchart TB
+  subgraph IN["① 入口"]
+    U["user"]
+    C["connector"]
+    A["agent"]
+  end
+
+  subgraph BUSY["② Busy gate"]
+    B{"忙？"}
+    QIN["enqueue → QueueEntry"]
+    RUN["tryStart → 立刻 invocation"]
+  end
+
+  subgraph DEQ["③ 出队 compareEntries"]
+    SORT["sort：continuation → position → urgent → createdAt"]
+    PICK["markProcessingAcrossUsers"]
+    EXEC["executeEntry → CLI"]
+  end
+
+  subgraph FAIR["④ 公平门"]
+    F{"non-agent 在等？"}
+    INLINE["inline 扩 worklist"]
+    DEFER["deferA2AEnqueue → 入队"]
+    BLOCK["tryAutoExecute return"]
+  end
+
+  subgraph DONE["⑤ 结束链"]
+    COMP["onInvocationComplete"]
+    NEXT["拉下一单"]
+  end
+
+  U --> B
+  C --> B
+  A --> QIN
+  B -->|是| QIN
+  B -->|否| RUN
+  QIN --> SORT
+  COMP --> SORT
+  SORT --> PICK --> EXEC
+  RUN --> EXEC
+  EXEC --> F
+  F -->|执行期 @猫| INLINE
+  F -->|是| DEFER
+  DEFER --> QIN
+  COMP --> BLOCK
+  COMP --> NEXT
+  NEXT --> SORT
+```
+
+**三层对照：**
+
+| 机制 | 时机 | 一句话 |
+|------|------|--------|
+| **Busy gate** | 消息**刚到** | 进门：跑还是入队？ |
+| **compareEntries** | **出队时** | 队列里多条 QueueEntry 谁先做？ |
+| **公平门** | **执行中** | non-agent 在等时，agent 不许绕队 inline 跑 |
+
+**前台对应：** `ThreadExecutionBar` = ⑤ 执行中 · `QueuePanel` = ②③ 排队与顺序
+
+---
+
+<a id="dispatch-timeline"></a>
+
+#### 时间线：完整例子
+
+**场景：** 猫 A 正跑；你发消息；CI 失败通知到达；猫 A 输出 `@猫B`。
+
+```
+T0  猫A invocation running（Tracker 占槽）
+
+T1  你发「帮我看下 PR」
+      Busy gate：thread 忙 → enqueue [#1 user]
+
+T2  GitHub CI 失败
+      Busy gate：isThreadBusy → enqueue [#2 connector urgent]
+
+T3  猫A 输出「@猫B 审查」
+      公平门：#1 #2 仍在 → defer enqueue [#3 agent/a2a→B]
+      （当场写入 QueueEntry.content=猫A输出，不是事后补记）
+
+      队列（compareEntries 视角）：
+        [#1 user] [#2 connector urgent] [#3 agent/a2a]
+
+T4  猫A invocation 结束 → onInvocationComplete
+      compareEntries 挑 #2 或 #1 先跑
+      tryAutoExecute：公平门挡着，不拉 #3
+
+T5  #1、#2 依次跑完
+      公平门清除 → tryAutoExecute 拉起 #3 → 猫B 新 invocation
+
+T6  （若你 whisper 给空闲的猫C，T1 时刻）
+      Busy gate：仅看猫C槽 → 空闲 → side-dispatch 立刻跑
+      （猫A 仍在跑，不挡）
+```
+
+**机制在时间轴上的位置：**
+
+```
+时间 ───────────────────────────────────────────────►
+
+T0 到达 ──► 【Busy gate】入队 or 立刻跑
+              │
+排队期       │  QueueEntry 在 QueuePanel
+              │
+出队期       └──► 【compareEntries】挑下一条
+              │
+执行期           【公平门】@猫 / autoExecute 是否让路
+              │
+结束期           onInvocationComplete → 回到出队期
+```
+
+---
+
+<a id="dispatch-graduation"></a>
+
+#### 调度章：还需了解什么？
+
+**已覆盖（可视为调度主干毕业）：** 术语表 · 总体 · 五概念 · 并行粒度 · 出队排序 · busy gate · 公平门 · 总图 · 时间线。
+
+**可选深挖（点名再挖）：**
+
+| 主题 | 人话 | 优先级 |
+|------|------|--------|
+| **hold + `deferWhileThreadBusy`** | hold 到期唤醒时 thread 仍忙，定时任务推迟 fire | 与②传球衔接时再看 |
+| **失败 pause / force / cancelAll** | 失败约 10s 自动恢复；强停语义 | 运维边角，知道有即可 |
+| **processingSlots gap** | invocation 交接窗口的忙判断补洞 | 排障用 |
+
+**调度章可「毕业」转其它脉：** ① 身份 · ④ 记忆 · ⑤ Skills/MCP · ⑥ SOP。日常协作理解不必再挖调度边角。
 
 ---
 
@@ -895,8 +1109,11 @@ stateDiagram-v2
 - [x] ③ 调度：并行粒度 → [并行粒度](#dispatch-parallel-granularity)
 - [x] ③ 调度：出队排序与 QueueEntry → [出队排序](#dispatch-dequeue-ordering)
 - [x] ③ 调度：公平门 → [公平门](#dispatch-fair-gate)
-- [ ] ③ 调度：busy gate 分层（thread / cat / 来源）
-- [ ] ③ 调度：hold 唤醒与 `deferWhileThreadBusy`
+- [x] ③ 调度：术语表 → [术语表](#dispatch-glossary)
+- [x] ③ 调度：busy gate → [busy gate](#dispatch-busy-gate)
+- [x] ③ 调度：总图 → [总图](#dispatch-flow-overview)
+- [x] ③ 调度：时间线 → [时间线](#dispatch-timeline)
+- [ ] ③ 调度：hold 唤醒与 `deferWhileThreadBusy`（可选）
 - [ ] ① 身份：roster / 会话绑定
 - [ ] ④ 记忆：索引与检索路径
 - [ ] ⑤ Skills / MCP 一次调用链路
@@ -924,3 +1141,4 @@ stateDiagram-v2
 | 2026-07-31 | ③ 调度：出队排序（compareEntries 四维 + batch + F175） |
 | 2026-07-31 | ③ 调度：澄清 multi-user / continuation / QueuePanel 拖动 |
 | 2026-07-31 | ③ 调度：公平门（tryAutoExecute + text-scan defer_queue） |
+| 2026-08-03 | ③ 调度：术语表、busy gate、总图、时间线、毕业清单 |
