@@ -500,7 +500,7 @@ stateDiagram-v2
 
 **定锚：** 路由定「叫醒谁」；调度定「现在能不能跑、忙则排队、按什么顺序出队」——统一走 `InvocationQueue` + `InvocationTracker`，busy gate 按来源分层（F175 / F185）。
 
-**章内跳转：** [术语表](#dispatch-glossary) · [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [busy gate](#dispatch-busy-gate) · [公平门](#dispatch-fair-gate) · [总图](#dispatch-flow-overview) · [时间线](#dispatch-timeline) · [回总地图](#1-总地图)
+**章内跳转：** [术语表](#dispatch-glossary) · [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [busy gate](#dispatch-busy-gate) · [公平门](#dispatch-fair-gate) · [总图](#dispatch-flow-overview) · [时间线](#dispatch-timeline) · [毕业清单](#dispatch-graduation) · [回总地图](#1-总地图)
 
 <a id="dispatch-glossary"></a>
 
