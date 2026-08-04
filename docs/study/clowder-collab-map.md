@@ -500,7 +500,7 @@ stateDiagram-v2
 
 **定锚：** 路由定「叫醒谁」；调度定「现在能不能跑、忙则排队、按什么顺序出队」——统一走 `InvocationQueue` + `InvocationTracker`，busy gate 按来源分层（F175 / F185）。
 
-**章内跳转：** [术语表](#dispatch-glossary) · [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [busy gate](#dispatch-busy-gate) · [公平门](#dispatch-fair-gate) · [总图](#dispatch-flow-overview) · [时间线](#dispatch-timeline) · [可靠性](#dispatch-reliability) · [毕业清单](#dispatch-graduation) · [回总地图](#1-总地图)
+**章内跳转：** [术语表](#dispatch-glossary) · [调度总体](#dispatch-overview) · [核心概念](#dispatch-core-concepts) · [并行粒度](#dispatch-parallel-granularity) · [出队排序](#dispatch-dequeue-ordering) · [busy gate](#dispatch-busy-gate) · [入队 vs 立刻跑](#dispatch-idle-vs-queue) · [公平门](#dispatch-fair-gate) · [总图](#dispatch-flow-overview) · [时间线](#dispatch-timeline) · [可靠性](#dispatch-reliability) · [毕业清单](#dispatch-graduation) · [回总地图](#1-总地图)
 
 <a id="dispatch-glossary"></a>
 
@@ -921,6 +921,58 @@ connector / 外部唤醒：
 
 ---
 
+<a id="dispatch-idle-vs-queue"></a>
+
+#### 入队 vs 立刻跑（三条来源对照）
+
+**问题引出：** 「消息到了、猫猫空闲，是不是永远不走队列？」——**用户消息**在空闲时通常立刻跑；**猫猫续任务**和**部分 A2A** 仍会入队或 inline，不能混成一条路。
+
+**定锚：** 是否产生 `QueueEntry` 取决于**来源 + 当时忙闲 + 公平门**，不是「空闲 = 一律 bypass 队列」。
+
+---
+
+**① 概念**
+
+| 来源 | 空闲时 | 忙时 | 是否进 `InvocationQueue` |
+|------|--------|------|--------------------------|
+| **用户消息** | 立刻 `tryStartThreadAll` → `routeExecution` | `enqueue` | **忙才入队**；显式 `deliveryMode=queue` 则即使空闲也入队 |
+| **continuation（续任务）** | `enqueueContinuation` → `autoExecute` | 同上，且 `compareEntries` **钉队首** | **总是入队**（`source=agent`, `sourceCategory=continuation`） |
+| **A2A `@` 其它猫** | 通常 **inline**：`worklist.push`，同一次 invocation 串行接力 | 仍在当前 invocation 内扩链 | **通常不入队**（UI 队列看不到新「票」） |
+| **A2A + 公平门** | 队列里已有 **non-agent** 在等 | defer | **入队**（`deferA2AEnqueue` → `source=agent`, `sourceCategory=a2a`） |
+| **connector / CI** | thread 空 → 立刻跑 | thread 忙 → `enqueue` | thread 级 busy gate |
+
+**用户消息默认规则（`messages.ts`）：** `deliveryMode ?? (hasActive ? 'queue' : 'immediate')`。Whisper 例外：只查**目标猫槽**是否忙，其它猫在跑时目标空闲仍可 side-dispatch。
+
+**continuation 入队后怎么跑：** `autoExecute=true` + slot 空时 `tryAutoExecute` 自动拉起；成功结束且 slot 上还有 continuation 时，可走 `onlyContinuation` 分支绕过公平门（用户票仍优先）。
+
+**A2A inline vs defer：**
+
+```
+猫 A 输出含 @猫B
+  ├─ 队列无 non-agent 等待 → worklist.push(猫B)  // 同 invocation，不入队
+  ├─ 有 user/connector 在等 → deferA2AEnqueue     // 入队，排在 non-agent 后面
+  └─ 执行被 abort → deferA2AEnqueue（兜底，避免 @ 丢失）
+```
+
+**② 怎么维护**
+
+- 用户路径：`messages.ts` — `hasActive` 分层 → `mode` → `enqueue` 或 `tryStartThreadAll`。
+- 续任务：`QueueProcessor.enqueueContinuation` — 总是 `queue.enqueue`；`tryAutoExecute` / `onInvocationComplete` 续拉。
+- A2A：`route-serial.ts` — text-scan → `resolveRoutingDecisions` → `enqueue_worklist` 或 `defer_queue`。
+- 公平门与 inline 分工见 [公平门](#dispatch-fair-gate)。
+
+**③ 技术命名**
+
+`deliveryMode` · `enqueueContinuation` · `tryAutoExecute` · `deferA2AEnqueue` · `worklist` / `WorklistRegistry` · `queueHasQueuedMessages` · `resolveRoutingDecisions`
+
+**④ 类**
+
+`messages.ts` · `QueueProcessor.ts` · `InvocationQueue.ts` · `route-serial.ts` · `routing-decision.ts`
+
+**一句话：** 用户消息忙才排队；猫猫续任务先拿 continuation 票；猫猫 `@` 猫默认在同 invocation 的 worklist 里接力，只有「用户也在排队」或执行被打断时才变成队列里的 agent 票。
+
+---
+
 <a id="dispatch-flow-overview"></a>
 
 #### 总图：三条机制如何配合
@@ -1135,7 +1187,7 @@ failed | canceled（非 user）:
 
 #### 调度章：还需了解什么？
 
-**已覆盖（可视为调度主干毕业）：** 术语表 · 总体 · 五概念 · 并行粒度 · 出队排序 · busy gate · 公平门 · 总图 · 时间线 · [可靠性](#dispatch-reliability)。
+**已覆盖（可视为调度主干毕业）：** 术语表 · 总体 · 五概念 · 并行粒度 · 出队排序 · busy gate · [入队 vs 立刻跑](#dispatch-idle-vs-queue) · 公平门 · 总图 · 时间线 · [可靠性](#dispatch-reliability)。
 
 **可选深挖（点名再挖）：**
 
@@ -1200,6 +1252,7 @@ failed | canceled（非 user）:
 - [x] ③ 调度：公平门 → [公平门](#dispatch-fair-gate)
 - [x] ③ 调度：术语表 → [术语表](#dispatch-glossary)
 - [x] ③ 调度：busy gate → [busy gate](#dispatch-busy-gate)
+- [x] ③ 调度：入队 vs 立刻跑 → [对照](#dispatch-idle-vs-queue)
 - [x] ③ 调度：总图 → [总图](#dispatch-flow-overview)
 - [x] ③ 调度：时间线 → [时间线](#dispatch-timeline)
 - [x] ③ 调度：可靠性（pause / force / cancelAll）→ [可靠性](#dispatch-reliability)
