@@ -105,8 +105,8 @@ flowchart TB
 
 | # | 卡在哪 | 为什么卡 | 下一问可以问 |
 |---|--------|----------|--------------|
-| 1 | ③ 调度已齐（含 [可靠性](#dispatch-reliability)） | hold defer 为可选 | 转 ④记忆 / ①身份，或② hold 衔接 |
-| 2 | 其它五脉只有章级框 | 尚未深挖 | 身份 / 记忆 / Skills / SOP |
+| 1 | ④ 记忆：渐进学 §1 术语表 | PR #5 暂不合并，作后台索引；学完一节再进下一节 | 四种「记忆」别混；从 [术语表](#memory-glossary) 开始 |
+| 2 | 其它四脉只有章级框 | 尚未深挖 | 身份 / Skills / SOP |
 
 （懂了就删行；整表最多 3 条。）
 
@@ -1206,9 +1206,336 @@ failed | canceled（非 user）:
 
 **问题引出：** 每次 invoke 上下文有限且会压缩；团队决策与教训若只活在对话里，换 session 就丢。记忆回答：如何把可追溯材料变成可检索证据，供猫按需取用。
 
-**定锚：** 可检索的证据库（evidence）承载跨会话知识；猫按需经检索接口取用，而不是每次靠全文重讲。
+**定锚：** **真相源在 `docs/` 等原文**；平台编译出 **evidence 索引**供检索；invoke 时平台只注入**会话连续性 + 消息窗口 + 导航指针**；跨会话项目知识主要靠猫调 **MCP 七工具族**主动搜，或 bootstrap 轻量 auto-recall。
 
-*（尚无主题小节）* · [回总地图](#1-总地图)
+**消息流转图（渐进迭代，只追加不改旧图）：** [`message-flow-diagrams.md`](./message-flow-diagrams.md)
+
+**章内跳转：** [术语表](#memory-glossary) · [记忆总体](#memory-overview) · [四种载体](#memory-stores) · [三入口路由](#memory-three-entries) · [invoke 注入栈](#memory-inject-stack) · [冷 vs 暖路径](#memory-cold-warm) · [Recall 闭环](#memory-recall-loop) · [治理三轴](#memory-governance) · [总图](#memory-flow-overview) · [毕业清单](#memory-graduation) · [回总地图](#1-总地图)
+
+<a id="memory-glossary"></a>
+
+#### 记忆术语表（研讨口语 → 项目词）
+
+| 口语 / 疑问 | 正式名 | 人话 |
+|-------------|--------|------|
+| **证据库 / 搜记忆** | `evidence.sqlite` + `IEvidenceStore` | 从 docs/thread/session 编译出的**可检索索引**；不是真相源本身 |
+| **搜一下 F186** | `cat_cafe_graph_resolve` | 已知 anchor（F 号、ADR）→ 沿引用边展开 |
+| **最近聊过啥** | `cat_cafe_list_recent` | 零先验扫一眼最近材料 |
+| **模糊找概念** | `cat_cafe_search_evidence` | lexical / semantic / hybrid 语义召回 |
+| **thread 摘要** | `ThreadMemory` / `threadMemory` | seal 时滚动的 extractive 摘要 + decisions/artifacts 账本 |
+| **session 冷启动包** | `Session Bootstrap` | Session #2+ 注入：identity、digest、threadMemory、工具说明 |
+| **导航头** | `navigation header` | Baton + 活跃任务 + 产物 + truth source（「先看 xxx」） |
+| **冷 @猫** | `cold mention`（F148） | 未见消息超阈值 → smart window，不全量灌历史 |
+| **搜了≠读了** | `RecallEvent`（F200） | 记录一次 memory tool 调用；真正 Read 才算 consumed |
+| **认知转折** | Event Memory（F227） | 拉闸/aha 等事件索引；与 evidence **并行**，不替代 |
+| **per-thread KV** | `IMemoryStore` | Redis `cat-cafe:memory:{threadId}` 键值；**不是** evidence |
+| **宪法级文档** | `always_on` / constitutional | authority 高、invoke 顶置注入；consumption 排序不降权 |
+
+**易混三分：** `Evidence`（跨会话知识检索）· `ThreadMemory`（单 thread 滚动摘要）· `IMemoryStore`（thread KV 便签）。口语「记忆」可能指三者之一，要先问清场景。
+
+---
+
+<a id="memory-overview"></a>
+
+#### 记忆总体
+
+**问题引出：** 若把全部 docs 塞进每次 prompt，上下文爆炸；若什么都不注入，猫每轮都像失忆。记忆要在**信噪比**与**可检索性**之间分层。
+
+**定锚：** 两条互补路径——**平台被动注入**（连续性）+ **猫主动检索**（跨会话知识）。
+
+---
+
+**① 概念**
+
+| 路径 | 人话 | 典型内容 |
+|------|------|----------|
+| **被动注入** | invoke 前平台自动塞进 prompt | 身份、队友、session bootstrap、消息窗口、navigation header、constitutional 摘要 |
+| **主动检索** | 猫 invoke 中调 MCP | `search_evidence` / `graph_resolve` / `list_recent` + Read/Grep drill-down |
+| **invoke 后闭环** | 搜了有没有真读 | `triggerRecallCorrelation` → consumption 调排序（F200） |
+
+分层栈（自顶向下，F169 框图仍适用）：
+
+```
+运行时导航（F148 navigation header）+ 治理顶置（F163 always_on）
+  ↓ 传输层（F148）bootstrap / incremental / smart window / threadMemory ledger
+  ↓ 治理层（F163）authority × activation × status
+  ↓ 索引层（F102）evidence.sqlite FTS5 + 向量 + passages + edges
+  ↓ 联邦/冷启动（F152/F186）scanner + library collections
+  ↓ 可观测（F200/F227）RecallEvent + Event Memory
+```
+
+**② 怎么维护**
+
+- **编译索引**：scanner / IndexBuilder 从 docs、thread transcript、session 写入 `evidence_docs`；定时 SummaryCompaction（LSM L1）。
+- **invoke 注入**：`route-serial` / `route-parallel` 拼 prompt 时拉 bootstrap + incremental context。
+- **猫检索**：MCP `cat_cafe_*` 工具 → `SqliteEvidenceStore.search()`。
+- **消费反馈**：routing 结束后 `recall-correlation-hook` 关联 Read → 刷新 rerank 信号。
+
+**③ 技术命名**
+
+`IEvidenceStore` · `assembleIncrementalContext` · `buildSessionBootstrap` · `buildInvocationContext` · `MEMORY_TOOL_SOURCES` · ADR-020
+
+**④ 类**
+
+`packages/api/src/domains/memory/` · `packages/mcp-server/src/tools/*` · `route-helpers.ts` · `SessionBootstrap.ts` · `cat-cafe-skills/refs/memory-routing-partial.md`
+
+---
+
+<a id="memory-stores"></a>
+
+#### 四种载体（别混成一锅）
+
+**问题引出：** 代码里多处叫「memory」——`MemoryStore`、`ThreadMemory`、`evidence`、`EventMemory` 各管什么？
+
+**定锚：** 按**存什么、谁读、怎么搜**分四路；日常协作先记 evidence + ThreadMemory 即可。
+
+| 载体 | 存什么 | 谁写 | 怎么取 |
+|------|--------|------|--------|
+| **Evidence** | feature/ADR/lesson/thread passage… | IndexBuilder / scanner | MCP `search_evidence`；`scope`=`docs\|threads\|sessions\|all` |
+| **ThreadMemory** | 跨 seal 滚动摘要 + decisions + `recentArtifacts` ledger | `SessionSealer` → `buildThreadMemory` | bootstrap 注入；索引进 evidence `kind=thread` |
+| **IMemoryStore** | per-thread KV（F3-lite） | `/api/memory` REST | 键值读写；**不进** evidence 主检索链 |
+| **Event Memory** | 认知转折（magic word、猫自声明） | `mark_event` / 检测器 | `list_events` / teleport；独立 SQLite |
+
+**EvidenceKind**（索引标签）：`feature | decision | plan | session | lesson | thread | discussion | research | pack-knowledge`。
+
+**③ 技术命名**
+
+`SqliteEvidenceStore` · `RedisMemoryStore` · `ThreadMemoryV1` · `EventMemoryStore` · `evidence_docs` / `evidence_passages`
+
+**④ 类**
+
+`domains/memory/` · `stores/ports/MemoryStore.ts` · `session/buildThreadMemory.ts` · `EventMemoryStore.ts`
+
+---
+
+<a id="memory-three-entries"></a>
+
+#### 三入口路由（graph / recent / search）
+
+**问题引出：** 猫常「只会 search_evidence」盲搜——已知 F 号时 graph 命中率高得多；不知道找啥时 recent 比反复换 query 高效。
+
+**定锚：** **按场景选入口**（SSOT：`memory-routing-partial.md`）；搜不准时系统 **nudge** 换入口。
+
+| 场景 | 入口 | 人话 |
+|------|------|------|
+| 精确 anchor / 看引用关系 | `cat_cafe_graph_resolve` | 已知 `F186`、`ADR-020` → 沿边走 |
+| 零先验 / 扫最近 | `cat_cafe_list_recent` | 「好像最近讨论过 X」、压缩后回顾 |
+| 语义 / 模糊概念 | `cat_cafe_search_evidence` | 关键词、跨语言；`mode`=lexical/semantic/**hybrid**（推荐） |
+
+**七工具族（互 cross-reference）：** search · graph_resolve · list_recent · list_session_chain · read_session_digest · read_session_events · read_invocation_detail。
+
+**自动 nudge（KD-7）：** `search_evidence` 无结果或低命中 → payload 末尾提示试 graph / recent。
+
+**隐私：** graph / recent 的 schema **不接受** client 自传 `collections`；可见 collection 由服务端按 agent identity 派生。
+
+**② 怎么维护**
+
+```
+猫有检索意图
+  → 有 anchor? → graph_resolve
+  → 零先验?   → list_recent
+  → 有概念词? → search_evidence (hybrid)
+  → nudge / drill-down → Read / Grep 读原文
+```
+
+**④ 类**
+
+`mcp-server/tools/evidence-tools.ts` · `graph-tools.ts` · `recent-tools.ts` · `session-chain-tools.ts`
+
+---
+
+<a id="memory-inject-stack"></a>
+
+#### invoke 注入栈（平台自动塞进 prompt 什么）
+
+**问题引出：** 猫没搜之前，invoke 的 prompt 里已经有什么？和 evidence 全文是一回事吗？
+
+**定锚：** **不是**。平台注入的是**连续性 + 指针**；evidence 全文靠猫主动 MCP 或 bootstrap 里 best-effort auto-recall（500ms 超时）。
+
+**拼 prompt 大致顺序（`route-serial`）：**
+
+| 块 | 来源 | 人话 |
+|----|------|------|
+| 静态身份 | `buildStaticIdentity` | 猫是谁、能力边界 |
+| 动态 invoke 段 | `buildInvocationContext` | 队友、链位置、cross-thread hint、乒乓球警告 |
+| Session bootstrap | `buildSessionBootstrap`（Session≥2） | digest、threadMemory、工具说明、可选 auto-recall |
+| Constitutional | F163 `queryAlwaysOn` | 高 authority 文档顶置 |
+| 消息上下文 | `assembleIncrementalContext` 或 legacy `assembleContext` | 对话历史 / 增量 cursor |
+| Navigation header | `formatNavigationHeader` | baton、tasks、artifacts、truth source |
+| MCP 回调说明 | `McpPromptInjector` | 本轮可用工具提示 |
+
+**legacy vs incremental：** `assembleContext` 从 messageStore 取最近 N 条 `[对话历史]`；`assembleIncrementalContext` 用 **delivery cursor** 只喂未见消息，并挂 F148 冷/暖逻辑。
+
+**④ 类**
+
+`SystemPromptBuilder.ts` · `ContextAssembler.ts` · `route-helpers.ts` · `navigation-context.ts`
+
+---
+
+<a id="memory-cold-warm"></a>
+
+#### 冷 vs 暖路径（F148 分层传输）
+
+**问题引出：** 冷 @一只猫、thread 里几百条未见消息——全灌会爆 token；只给最近几条又丢决策上下文。
+
+**定锚：** **暖路径** = cursor 增量 + navigation header；**冷路径** = smart window（burst + tombstone + evidence BM25 top 2–3）。
+
+**触发 cold mention（`assembleIncrementalContext`）：**
+
+- 未见消息条数 > `coldMentionThreshold`，或
+- 未见 token 估计 > `coldMentionTokenThreshold`
+
+**cold 路径做什么：**
+
+1. **Recent burst** — 最近一小段原文  
+2. **Coverage tombstone** — 跳过区间的结构化摘要 + retrieval hints  
+3. **Evidence BM25 recall** — 从 evidence 捞 2–3 条相关 passage 补洞  
+
+目标：长 thread 冷启动从 ~160K tokens 量级压到 ~25–40K。
+
+**navigation header（warm/cold 都注入）：** 球权 baton、活跃任务、`recentArtifacts` top、ranked truth source——告诉猫「先看哪份材料」，不等于把材料全文塞进 prompt。
+
+**② 怎么维护**
+
+```
+assembleIncrementalContext
+  → formatNavigationHeader（始终）
+  → cold? → smart window + tombstone + BM25
+  → else  → warm 增量消息窗口
+```
+
+**④ 类**
+
+`route-helpers.ts` · `artifact-tracking.ts` · `docs/features/F148-hierarchical-context-transport.md`
+
+---
+
+<a id="memory-recall-loop"></a>
+
+#### Recall 闭环（搜了不算，读了才算）
+
+**问题引出：** 检索排序若只看「被搜过几次」，热门垃圾文会一直霸榜；若只看静态 authority，猫从不打开的「正确文档」永远排前面。
+
+**定锚：** F200 — **RecallEvent** 记录 memory tool 调用；**RecallEventCorrelator** 在 invoke 结束后关联后续 Read/Grep/shell-read → **consumption rerank**（不改 constitutional 降权规则）。
+
+**流程：**
+
+```
+invoke 中：猫调 search_evidence / graph_resolve / list_recent
+invoke 结束：triggerRecallCorrelation（fire-and-forget）
+  → 从 toolEventLog 筛 memory tool 事件
+  → RecallEventCorrelator：候选 doc ↔ 后续 Read 窗口关联
+  → RecallMetricsComputer：anchor CTR、consumption prior
+  → 下次 search_evidence 排序融合 F200_CONSUMPTION_RERANK
+```
+
+**排序规则要点：**
+
+- 被真实消费的文档排名升；长期无人读逐渐下沉  
+- Constitutional（ADR/lesson/canon）**永不降权**  
+- 新文档 14 天 grace + Bayesian 先验  
+- `graph_resolve` 边权重也融合消费频次  
+
+**④ 类**
+
+`recall-correlation-hook.ts` · `RecallEventCorrelator.ts` · `RecallMetricsComputer.ts` · `TrajectoryAggregator.ts`
+
+---
+
+<a id="memory-governance"></a>
+
+#### 治理三轴（F163 — 不是什么都该被搜到）
+
+**问题引出：** evidence 索引越大，猫越容易在 invoke 里被噪声淹没；需要「什么必须顶置、什么只能按需搜、什么已作废」。
+
+**定锚：** **authority × activation × status** 控信噪比；`always_on` 在 invoke 顶置注入，与 search 排序独立。
+
+| 轴 | 含义 | 例子 |
+|----|------|------|
+| **authority** | 可信度层级 | constitutional / validated / candidate / observed |
+| **activation** | 怎么进上下文 | always_on / scoped / query / backstop |
+| **status** | 生命周期 | active / review / invalidated / archived |
+
+**与 recall 分工：** F163 管**能不能顶置、能不能信**；F200 管**搜出来后排第几**（consumption）；constitutional 两条线都不降权。
+
+**④ 类**
+
+`f163-types.ts` · `docs/features/F163-memory-entropy-reduction.md` · `route-serial.ts` alwaysOn 查询
+
+---
+
+<a id="memory-flow-overview"></a>
+
+#### 总图：注入 + 检索 + 闭环
+
+```mermaid
+flowchart TB
+  UM["用户消息 / @猫"]
+  RS["route-serial / route-parallel"]
+
+  UM --> RS
+
+  subgraph INJECT["平台被动注入"]
+    II["buildInvocationContext"]
+    SB["Session Bootstrap"]
+    AO["F163 always_on"]
+    NAV["assembleIncrementalContext + navigation header"]
+  end
+
+  RS --> INJECT
+
+  subgraph COLD["F148 冷路径"]
+    SW["smart window"]
+    TS["tombstone"]
+    BM["evidence BM25 top-k"]
+  end
+
+  NAV --> COLD
+
+  PROMPT["拼 prompt → 猫 CLI"]
+  INJECT --> PROMPT
+  COLD --> PROMPT
+
+  subgraph ACTIVE["猫主动检索"]
+    G["graph_resolve"]
+    R["list_recent"]
+    S["search_evidence"]
+    RD["Read / Grep drill-down"]
+    G --> RD
+    R --> RD
+    S --> RD
+  end
+
+  PROMPT --> ACTIVE
+
+  subgraph POST["invoke 后 F200"]
+    TEL["toolEventLog"]
+    RC["triggerRecallCorrelation"]
+    MET["consumption rerank"]
+    TEL --> RC --> MET
+  end
+
+  ACTIVE --> POST
+```
+
+---
+
+<a id="memory-graduation"></a>
+
+#### 记忆章：还需了解什么？
+
+**已覆盖（主干毕业）：** 术语表 · 总体 · 四载体 · 三入口 · 注入栈 · 冷/暖 · Recall 闭环 · 治理三轴 · 总图。
+
+**可选深挖（点名再挖）：**
+
+| 主题 | 人话 | 优先级 |
+|------|------|--------|
+| **Library 联邦（F186）** | `dimension=library`、Collection、private collection 跳过 | 跨项目时再看 |
+| **Event Memory 细节（F227）** | mark/list/teleport、与 evidence 并行 | 认知事件治理时 |
+| **Marker / 物化管线** | markers → materialization 进 docs | 运维向 |
+| **Passage 向量（F209）** | `depth=raw`、Perspective 活查询 | 检索调优向 |
+
+**记忆章可「毕业」转其它脉：** ① 身份 · ⑤ Skills/MCP · ⑥ SOP。
 
 ---
 
@@ -1258,7 +1585,14 @@ failed | canceled（非 user）:
 - [x] ③ 调度：可靠性（pause / force / cancelAll）→ [可靠性](#dispatch-reliability)
 - [ ] ③ 调度：hold 唤醒与 `deferWhileThreadBusy`（可选）
 - [ ] ① 身份：roster / 会话绑定
-- [ ] ④ 记忆：索引与检索路径
+- [x] ④ 记忆：总体 → [记忆总体](#memory-overview)
+- [x] ④ 记忆：四载体 → [四种载体](#memory-stores)
+- [x] ④ 记忆：三入口路由 → [三入口](#memory-three-entries)
+- [x] ④ 记忆：invoke 注入栈 → [注入栈](#memory-inject-stack)
+- [x] ④ 记忆：冷 vs 暖 → [冷/暖路径](#memory-cold-warm)
+- [x] ④ 记忆：Recall 闭环 → [Recall](#memory-recall-loop)
+- [x] ④ 记忆：治理三轴 → [F163](#memory-governance)
+- [ ] ④ 记忆：Library 联邦 F186（可选）
 - [ ] ⑤ Skills / MCP 一次调用链路
 - [ ] ⑥ SOP 五步与门禁
 
@@ -1286,3 +1620,7 @@ failed | canceled（非 user）:
 | 2026-07-31 | ③ 调度：公平门（tryAutoExecute + text-scan defer_queue） |
 | 2026-08-03 | ③ 调度：术语表、busy gate、总图、时间线、毕业清单 |
 | 2026-08-03 | ③ 调度：可靠性（pause / force / cancelAll / force-reset） |
+| 2026-08-04 | ③ 调度：入队 vs 立刻跑（用户 / continuation / A2A 三条来源对照） |
+| 2026-08-04 | ④ 记忆：术语表、四载体、三入口、注入栈、冷/暖、Recall、F163、总图 |
+| 2026-08-11 | 新建 `message-flow-diagrams.md`：F300 全景迭代 1 + seal 答疑迭代 2 |
+| 2026-08-11 | 流转图迭代 3：MessageStore vs per-cat Session transcript |
