@@ -166,6 +166,54 @@ flowchart TB
 
 ---
 
+## 迭代 4 — 2026-08-11 · A→B→C 链：C 能看见 A 吗？
+
+**问题：** A 交接 B，B 再交接 C，C 是否只能看「交给自己的摘要」，看不到 A 原文？  
+**结论：** **默认 play + 增量上下文下，C 通常看不到 A 的原文，也看不到 B 的完整发言**（都落在 MessageStore，但被可见性规则挡在 prompt 外）。C 主要靠：**用户原话**、**ThreadMemory 旧摘要**、**「球来自 B」元数据**，以及猫主动 **MCP 读链/搜 evidence**。
+
+```mermaid
+flowchart TB
+  U["用户原话"]
+  A["A 发言 → MessageStore<br/>origin=stream"]
+  B["B 发言 + @C → MessageStore<br/>origin=stream"]
+
+  subgraph C_PROMPT["C 本次 prompt（play + incremental）"]
+    U_OK["✅ 用户消息"]
+    META["✅ directMessageFrom：球来自 B（无全文）"]
+    TM["✅ ThreadMemory / bootstrap（旧摘要）"]
+    NAV["✅ navigation header"]
+    A_HIDE["❌ A 原文（别猫 stream 过滤）"]
+    B_HIDE["❌ B 全文（同上）"]
+  end
+
+  subgraph OTHER["其它路径"]
+    DEFER["defer 入队：QueueEntry.content = B 全文"]
+    DEBUG["debug 模式：previousResponses 累链"]
+    LEGACY["无 cursor：assembleContext 含跨猫历史"]
+    TOOLS["MCP：session_chain / search_evidence"]
+  end
+
+  U --> U_OK
+  A --> A_HIDE
+  B --> B_HIDE
+  B --> META
+  B --> DEFER
+  A -.-> TOOLS
+  B -.-> TOOLS
+```
+
+| 路径 | C 能看到 A？ | C 能看到 B 全文？ |
+|------|-------------|------------------|
+| **inline A2A + play + incremental**（常见） | 一般 **不能** | 一般 **不能**（靠元数据 + 工具） |
+| **defer 入队 A2A** | 仅 B 文中转述 | **能**（`entry.content`） |
+| **debug 模式** | **能**（`previousResponses`） | **能** |
+| **legacy assembleContext** | **能**（最近 N 条跨猫） | **能** |
+| **seal 后 ThreadMemory** | 摘要级 | 摘要级（非同一 invocation 即时） |
+
+**和 Session seal 的关系：** seal 产出 digest / ThreadMemory，**不是**「B 把 A 的摘要转交给 C」的专用机制；A2A 链内 C 的可见性主要由 **MessageStore + 增量上下文过滤** 决定。
+
+---
+
 ## 修订记录
 
 | 日期 | 迭代 | 说明 |
@@ -173,3 +221,4 @@ flowchart TB
 | 2026-08-11 | 1 | F300 全景第一版 |
 | 2026-08-11 | 2 | Session seal 与 A2A 关系答疑 |
 | 2026-08-11 | 3 | per-cat Session 是否含别猫聊天 |
+| 2026-08-11 | 4 | A→B→C 上下文可见性 |
