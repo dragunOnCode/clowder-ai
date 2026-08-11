@@ -1623,3 +1623,4 @@ flowchart TB
 | 2026-08-04 | ③ 调度：入队 vs 立刻跑（用户 / continuation / A2A 三条来源对照） |
 | 2026-08-04 | ④ 记忆：术语表、四载体、三入口、注入栈、冷/暖、Recall、F163、总图 |
 | 2026-08-11 | 新建 `message-flow-diagrams.md`：F300 全景迭代 1 + seal 答疑迭代 2 |
+| 2026-08-11 | 流转图迭代 3：MessageStore vs per-cat Session transcript |

@@ -113,9 +113,63 @@ flowchart LR
 
 ---
 
+## 迭代 3 — 2026-08-11 · 聊天记录存在哪？（per-cat Session 答疑）
+
+**问题：** 每只猫的 session 会存其他猫的聊天记录吗？  
+**结论：** **不会把别的猫的完整聊天抄进自己的 Session transcript。** 共享聊天在 **MessageStore（thread 级）**；Session 是 **per-cat 运行时审计链**；跨猫协作时，别的猫内容通过 **prompt 注入** 或 **共享 ThreadMemory** 进入视野，而不是写进「我的 session 文件夹」。
+
+```mermaid
+flowchart TB
+  subgraph THREAD["同一条 Thread（共享）"]
+    MS["MessageStore<br/>用户 + 所有猫的消息真身"]
+    TM["ThreadMemory<br/>rolling 摘要（所有猫共享一份）"]
+  end
+
+  subgraph CAT_A["布偶猫"]
+    SA["Session transcript<br/>threads/…/布偶/sessions/…/events.jsonl"]
+    SA_NOTE["≈ 布偶自己的 CLI 事件流"]
+  end
+
+  subgraph CAT_B["缅因猫"]
+    SB["Session transcript<br/>threads/…/缅因/sessions/…/events.jsonl"]
+    SB_NOTE["≈ 缅因自己的 CLI 事件流"]
+  end
+
+  subgraph INJECT["invoke 时「看到」别猫（非 session 存储）"]
+    A2A["A2A：previousResponses 拼进 prompt"]
+    INC["assembleIncrementalContext<br/>从 MessageStore 读消息窗口"]
+    BOOT["bootstrap：共享 ThreadMemory"]
+  end
+
+  MS --> INC
+  MS --> A2A
+  TM --> BOOT
+  A2A --> SB
+  INC --> SB
+  BOOT --> SB
+
+  SA -->|"seal → digest"| TM
+  SB -->|"seal → digest"| TM
+
+  MS -.->|"不写入"| SA
+  SA -.->|"不复制全文"| SB
+```
+
+**对照表：**
+
+| 存什么 | 粒度 | 含其他猫聊天？ |
+|--------|------|----------------|
+| **MessageStore** | thread | **是** — 全场聊天记录 |
+| **Session transcript** | per-cat × session | **否** — 主要是本猫 invoke 事件 |
+| **ThreadMemory** | thread | **是摘要** — 各猫 seal 后合并进同一份 thread 摘要 |
+| **Evidence 索引** | 项目/thread | 可索引全场 passage，不是「塞进某猫 session 文件」 |
+
+---
+
 ## 修订记录
 
 | 日期 | 迭代 | 说明 |
 |------|------|------|
 | 2026-08-11 | 1 | F300 全景第一版 |
 | 2026-08-11 | 2 | Session seal 与 A2A 关系答疑 |
+| 2026-08-11 | 3 | per-cat Session 是否含别猫聊天 |
