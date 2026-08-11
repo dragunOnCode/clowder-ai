@@ -1208,6 +1208,8 @@ failed | canceled（非 user）:
 
 **定锚：** **真相源在 `docs/` 等原文**；平台编译出 **evidence 索引**供检索；invoke 时平台只注入**会话连续性 + 消息窗口 + 导航指针**；跨会话项目知识主要靠猫调 **MCP 七工具族**主动搜，或 bootstrap 轻量 auto-recall。
 
+**消息流转图（渐进迭代，只追加不改旧图）：** [`message-flow-diagrams.md`](./message-flow-diagrams.md)
+
 **章内跳转：** [术语表](#memory-glossary) · [记忆总体](#memory-overview) · [四种载体](#memory-stores) · [三入口路由](#memory-three-entries) · [invoke 注入栈](#memory-inject-stack) · [冷 vs 暖路径](#memory-cold-warm) · [Recall 闭环](#memory-recall-loop) · [治理三轴](#memory-governance) · [总图](#memory-flow-overview) · [毕业清单](#memory-graduation) · [回总地图](#1-总地图)
 
 <a id="memory-glossary"></a>
@@ -1620,3 +1622,4 @@ flowchart TB
 | 2026-08-03 | ③ 调度：可靠性（pause / force / cancelAll / force-reset） |
 | 2026-08-04 | ③ 调度：入队 vs 立刻跑（用户 / continuation / A2A 三条来源对照） |
 | 2026-08-04 | ④ 记忆：术语表、四载体、三入口、注入栈、冷/暖、Recall、F163、总图 |
+| 2026-08-11 | 新建 `message-flow-diagrams.md`：F300 全景迭代 1 + seal 答疑迭代 2 |
